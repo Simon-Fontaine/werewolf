@@ -286,6 +286,8 @@ model Ability {
   lastUsedDay  Int? @map("last_used_day")
   cooldownDays Int  @default(0) @map("cooldown_days")
 
+  metadata Json? @map("metadata") // Additional data like target player ID
+
   player Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
 
   @@unique([playerId, abilityType])
