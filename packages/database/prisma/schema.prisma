@@ -141,14 +141,15 @@ model User {
   updatedAt  DateTime @updatedAt @map("updated_at")
 
   // Relations
-  sessions     Session[]
-  playingIn    Player[]
-  hostedGames  Game[]      @relation("GameHost")
-  spectating   Spectator[]
-  friendsOf    Friend[]    @relation("FriendRequester")
-  friendsWith  Friend[]    @relation("FriendReceiver")
-  sentMessages Message[]
-  statistics   UserStats?
+  sessions      Session[]
+  refreshTokens RefreshToken[]
+  playingIn     Player[]
+  hostedGames   Game[]         @relation("GameHost")
+  spectating    Spectator[]
+  friendsOf     Friend[]       @relation("FriendRequester")
+  friendsWith   Friend[]       @relation("FriendReceiver")
+  sentMessages  Message[]
+  statistics    UserStats?
 
   @@index([accountType, status])
   @@index([lastActive])
@@ -167,6 +168,22 @@ model Session {
 
   @@index([userId])
   @@map("sessions")
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String    @map("user_id")
+  token     String    @unique
+  expiresAt DateTime  @map("expires_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  revokedAt DateTime? @map("revoked_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
 }
 
 // =====================================================

@@ -4,12 +4,25 @@
   "version": "1.0.0",
   "description": "",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "prisma generate --watch",
+    "build": "prisma generate",
+    "db:push": "prisma db push",
+    "db:migrate": "prisma migrate dev",
+    "db:migrate:prod": "prisma migrate deploy",
+    "studio": "prisma studio"
   },
   "keywords": [],
   "author": "Simon Fontaine",
   "license": "MIT",
   "type": "module",
+  "main": "./generated/prisma/index.js",
+  "types": "./generated/prisma/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./generated/prisma/index.d.ts",
+      "import": "./generated/prisma/index.js"
+    }
+  },
   "devDependencies": {
     "prisma": "^6.9.0"
   },
