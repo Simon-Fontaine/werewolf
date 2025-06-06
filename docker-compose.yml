@@ -1,0 +1,59 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: werewolf-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-werewolf_db}
+      POSTGRES_USER: ${POSTGRES_USER:-werewolf_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secure_password_123}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:8-alpine
+    container_name: werewolf-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis_password_123}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: werewolf-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin123}
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - postgres
+
+  redis-insight:
+    image: redis/redisinsight:latest
+    container_name: werewolf-redis-insight
+    restart: unless-stopped
+    ports:
+      - "5540:5540"
+    volumes:
+      - redis_insight_data:/db
+    depends_on:
+      - redis
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  pgadmin_data:
+    driver: local
+  redis_insight_data:
+    driver: local

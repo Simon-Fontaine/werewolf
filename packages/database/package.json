@@ -1,0 +1,19 @@
+{
+  "private": true,
+  "name": "@werewolf/database",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "Simon Fontaine",
+  "license": "MIT",
+  "type": "module",
+  "devDependencies": {
+    "prisma": "^6.9.0"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.9.0"
+  }
+}

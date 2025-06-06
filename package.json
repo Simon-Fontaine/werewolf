@@ -1,0 +1,30 @@
+{
+  "private": true,
+  "name": "werewolf",
+  "version": "1.0.0",
+  "description": "",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:database\" \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:database": "npm run dev -w @werewolf/database",
+    "dev:backend": "npm run dev -w @werewolf/backend",
+    "dev:frontend": "npm run dev -w @werewolf/frontend",
+    "build": "npm run build:database && npm run build:backend && npm run build:frontend",
+    "build:database": "npm run build -w @werewolf/database",
+    "build:backend": "npm run build -w @werewolf/backend",
+    "build:frontend": "npm run build -w @werewolf/frontend",
+    "clean": "npm run clean --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "format": "prettier --write \"**/*.{js,jsx,ts,tsx,json,md}\""
+  },
+  "keywords": [],
+  "author": "Simon Fontaine",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "prettier": "^3.5.3"
+  }
+}

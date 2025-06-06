@@ -1,0 +1,417 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =====================================================
+// ENUMS - Complete game type definitions
+// =====================================================
+
+enum AccountType {
+  GUEST
+  REGISTERED
+  PREMIUM
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  BANNED
+}
+
+enum GameRole {
+  // Werewolves Team
+  WEREWOLF
+  BLACK_WOLF
+  WOLF_RIDING_HOOD
+
+  // Solo Team
+  WHITE_WOLF
+  MERCENARY
+
+  // Villagers Team
+  VILLAGER
+  SEER
+  TALKATIVE_SEER
+  WITCH
+  POISONER
+  LITTLE_GIRL
+  HUNTER
+  GUARD
+  CUPID
+  DICTATOR
+  RED_RIDING_HOOD
+  BLUE_RIDING_HOOD
+  HEIR
+  PLUNDERER
+}
+
+enum Team {
+  WEREWOLVES
+  VILLAGERS
+  SOLO
+}
+
+enum GameState {
+  WAITING // Waiting for players to join
+  STARTING // Countdown before game starts
+  NIGHT // Night phase - werewolves and special roles act
+  DAY // Day phase - discussion
+  VOTING // Day voting phase
+  ENDED // Game finished
+  CANCELLED // Game cancelled
+}
+
+enum GamePhase {
+  LOBBY
+  ROLE_ASSIGNMENT
+  NIGHT_PHASE
+  DAY_DISCUSSION
+  DAY_VOTING
+  GAME_END
+}
+
+enum PlayerState {
+  ALIVE
+  DEAD
+  SPECTATING
+  DISCONNECTED
+}
+
+enum ActionType {
+  WEREWOLF_VOTE
+  SEER_INVESTIGATE
+  WITCH_HEAL
+  WITCH_POISON
+  GUARD_PROTECT
+  HUNTER_SHOOT
+  DAY_VOTE
+  DICTATOR_COUP
+  CUPID_LINK
+  HEIR_CHOOSE
+  WHITE_WOLF_DEVOUR
+  BLACK_WOLF_CONVERT
+}
+
+enum ActionResult {
+  SUCCESS
+  FAILED
+  BLOCKED
+  NO_EFFECT
+}
+
+// =====================================================
+// USER MANAGEMENT
+// =====================================================
+
+model User {
+  id           String  @id @default(cuid())
+  username     String? @unique @db.VarChar(30)
+  email        String? @unique
+  passwordHash String? @map("password_hash")
+
+  // Account info
+  accountType AccountType @default(GUEST)
+  status      UserStatus  @default(ACTIVE)
+
+  // Profile
+  displayName String? @map("display_name") @db.VarChar(50)
+  avatarUrl   String? @map("avatar_url")
+  level       Int     @default(1)
+  experience  Int     @default(0)
+
+  // Guest support
+  guestId  String? @unique @map("guest_id")
+  deviceId String? @map("device_id")
+
+  // Timestamps
+  lastActive DateTime @default(now()) @map("last_active")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  sessions     Session[]
+  playingIn    Player[]
+  hostedGames  Game[]      @relation("GameHost")
+  spectating   Spectator[]
+  friendsOf    Friend[]    @relation("FriendRequester")
+  friendsWith  Friend[]    @relation("FriendReceiver")
+  sentMessages Message[]
+  statistics   UserStats?
+
+  @@index([accountType, status])
+  @@index([lastActive])
+  @@map("users")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  userId       String   @map("user_id")
+  sessionToken String   @unique @map("session_token")
+  deviceId     String?  @map("device_id")
+  expiresAt    DateTime @map("expires_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+// =====================================================
+// CORE GAME MODELS
+// =====================================================
+
+model Game {
+  id     String @id @default(cuid())
+  code   String @unique @db.VarChar(6) // Room code
+  name   String @db.VarChar(50)
+  hostId String @map("host_id")
+
+  // Game configuration
+  state     GameState @default(WAITING)
+  phase     GamePhase @default(LOBBY)
+  dayNumber Int       @default(0) @map("day_number")
+
+  // Player limits
+  minPlayers Int @default(5) @map("min_players")
+  maxPlayers Int @default(15) @map("max_players")
+
+  // Privacy
+  isPrivate Boolean @default(false) @map("is_private")
+  password  String?
+
+  // Phase timing (in seconds)
+  nightDuration Int @default(90) @map("night_duration")
+  dayDuration   Int @default(180) @map("day_duration")
+  voteDuration  Int @default(60) @map("vote_duration")
+
+  // Current phase tracking
+  phaseStartedAt DateTime? @map("phase_started_at")
+  phaseEndsAt    DateTime? @map("phase_ends_at")
+
+  // Game result
+  winningTeam Team?   @map("winning_team")
+  endReason   String? @map("end_reason")
+
+  // Timestamps
+  createdAt DateTime  @default(now()) @map("created_at")
+  startedAt DateTime? @map("started_at")
+  endedAt   DateTime? @map("ended_at")
+
+  // Relations
+  host       User          @relation("GameHost", fields: [hostId], references: [id])
+  players    Player[]
+  spectators Spectator[]
+  actions    GameAction[]
+  events     GameEvent[]
+  messages   GameMessage[]
+
+  @@index([state, createdAt])
+  @@index([code])
+  @@map("games")
+}
+
+model Player {
+  id     String @id @default(cuid())
+  gameId String @map("game_id")
+  userId String @map("user_id")
+
+  // Game state
+  role     GameRole    @default(VILLAGER)
+  state    PlayerState @default(ALIVE)
+  position Int // Seat position (1-15)
+
+  // Role-specific data
+  isRevealed  Boolean @default(false) @map("is_revealed") // For Talkative Seer
+  linkedTo    String? @map("linked_to") // For Cupid lovers
+  protectedBy String? @map("protected_by") // Current protection
+
+  // Timestamps
+  joinedAt DateTime  @default(now()) @map("joined_at")
+  diedAt   DateTime? @map("died_at")
+  leftAt   DateTime? @map("left_at")
+
+  // Relations
+  game      Game         @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  user      User         @relation(fields: [userId], references: [id])
+  abilities Ability[]
+  actions   GameAction[] @relation("ActionPerformer")
+  targeted  GameAction[] @relation("ActionTarget")
+
+  @@unique([gameId, userId])
+  @@unique([gameId, position])
+  @@index([gameId, state])
+  @@map("players")
+}
+
+// Track special abilities and their usage
+model Ability {
+  id       String @id @default(cuid())
+  playerId String @map("player_id")
+
+  abilityType String @map("ability_type") // heal, poison, convert, etc.
+  usesLeft    Int    @default(1) @map("uses_left")
+  maxUses     Int    @default(1) @map("max_uses")
+
+  // Cooldown for abilities like White Wolf devour
+  lastUsedDay  Int? @map("last_used_day")
+  cooldownDays Int  @default(0) @map("cooldown_days")
+
+  player Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([playerId, abilityType])
+  @@map("abilities")
+}
+
+model Spectator {
+  id       String   @id @default(cuid())
+  gameId   String   @map("game_id")
+  userId   String   @map("user_id")
+  joinedAt DateTime @default(now()) @map("joined_at")
+
+  game Game @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([gameId, userId])
+  @@map("spectators")
+}
+
+// =====================================================
+// GAME MECHANICS
+// =====================================================
+
+model GameAction {
+  id          String  @id @default(cuid())
+  gameId      String  @map("game_id")
+  performerId String  @map("performer_id")
+  targetId    String? @map("target_id")
+
+  actionType ActionType @map("action_type")
+  dayNumber  Int        @map("day_number")
+  phase      GamePhase
+
+  // Action details
+  metadata   Json? // Additional action-specific data
+  result     ActionResult @default(SUCCESS)
+  resultData Json?        @map("result_data")
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  processedAt DateTime? @map("processed_at")
+
+  game      Game    @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  performer Player  @relation("ActionPerformer", fields: [performerId], references: [id])
+  target    Player? @relation("ActionTarget", fields: [targetId], references: [id])
+
+  @@unique([gameId, performerId, actionType, dayNumber, phase])
+  @@index([gameId, dayNumber, phase])
+  @@map("game_actions")
+}
+
+// Game events for history and replay
+model GameEvent {
+  id        String @id @default(cuid())
+  gameId    String @map("game_id")
+  eventType String @map("event_type") // phase_change, player_died, role_revealed, etc.
+  dayNumber Int    @map("day_number")
+
+  data      Json // Event-specific data
+  createdAt DateTime @default(now()) @map("created_at")
+
+  game Game @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@index([gameId, dayNumber])
+  @@index([gameId, eventType])
+  @@map("game_events")
+}
+
+// =====================================================
+// SOCIAL FEATURES
+// =====================================================
+
+model Friend {
+  id          String @id @default(cuid())
+  requesterId String @map("requester_id")
+  receiverId  String @map("receiver_id")
+
+  accepted  Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  requester User @relation("FriendRequester", fields: [requesterId], references: [id])
+  receiver  User @relation("FriendReceiver", fields: [receiverId], references: [id])
+
+  @@unique([requesterId, receiverId])
+  @@index([receiverId, accepted])
+  @@map("friends")
+}
+
+model Message {
+  id         String @id @default(cuid())
+  senderId   String @map("sender_id")
+  receiverId String @map("receiver_id")
+
+  content   String   @db.Text
+  isRead    Boolean  @default(false) @map("is_read")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  sender User @relation(fields: [senderId], references: [id])
+
+  @@index([receiverId, isRead])
+  @@index([senderId, receiverId])
+  @@map("messages")
+}
+
+// In-game chat messages
+model GameMessage {
+  id       String @id @default(cuid())
+  gameId   String @map("game_id")
+  playerId String @map("player_id")
+
+  channel   String // all, werewolves, dead, spectators
+  content   String   @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+
+  game Game @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@index([gameId, channel])
+  @@map("game_messages")
+}
+
+// =====================================================
+// STATISTICS
+// =====================================================
+
+model UserStats {
+  id     String @id @default(cuid())
+  userId String @unique @map("user_id")
+
+  gamesPlayed Int @default(0) @map("games_played")
+  gamesWon    Int @default(0) @map("games_won")
+
+  // Role-specific stats
+  gamesAsWerewolf Int @default(0) @map("games_as_werewolf")
+  gamesAsVillager Int @default(0) @map("games_as_villager")
+  gamesAsSolo     Int @default(0) @map("games_as_solo")
+
+  // Win rates
+  werewolfWins Int @default(0) @map("werewolf_wins")
+  villagerWins Int @default(0) @map("villager_wins")
+  soloWins     Int @default(0) @map("solo_wins")
+
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_stats")
+}
