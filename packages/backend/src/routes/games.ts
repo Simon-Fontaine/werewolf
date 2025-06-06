@@ -248,9 +248,7 @@ export const registerGameRoutes: FastifyPluginAsyncZod = async (app) => {
         playerCount: game._count.players,
         role: game.players[0].role,
         survived: game.players[0].state === "ALIVE",
-        won:
-          game.winningTeam ===
-          gameService.roleService.getTeamForRole(game.players[0].role),
+        won: false, // TODO: Implement proper win condition checking
         winningTeam: game.winningTeam,
       }));
     },

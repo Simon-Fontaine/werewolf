@@ -1,4 +1,10 @@
-import { ActionType, GamePhase, PlayerState, Prisma } from "@werewolf/database";
+import {
+  ActionType,
+  GamePhase,
+  PlayerState,
+  Prisma,
+  GameRole,
+} from "@werewolf/database";
 import { PrismaClientType } from "../lib/prisma.js";
 import { RedisClientType } from "../lib/redis.js";
 import { GamePubSub } from "../lib/pubsub.js";
@@ -252,7 +258,7 @@ export class VotingService {
     if (!player) return;
 
     // Hunter's revenge shot
-    if (player.role === "HUNTER") {
+    if (player.role === GameRole.HUNTER) {
       // In a real implementation, you'd prompt the Hunter to choose a target
       // For now, we'll mark that the Hunter needs to take their shot
       await this.prisma.gameEvent.create({
@@ -315,11 +321,11 @@ export class VotingService {
     }
 
     // Wolf Riding Hood protection check
-    if (player.role === "BLACK_WOLF") {
+    if (player.role === GameRole.BLACK_WOLF) {
       const wolfRidingHood = await this.prisma.player.findFirst({
         where: {
           gameId,
-          role: "WOLF_RIDING_HOOD",
+          role: GameRole.WOLF_RIDING_HOOD,
           state: PlayerState.ALIVE,
         },
       });
@@ -341,11 +347,11 @@ export class VotingService {
     }
 
     // Similar check for Hunter/Red Riding Hood relationship
-    if (player.role === "HUNTER") {
+    if (player.role === GameRole.HUNTER) {
       const redRidingHood = await this.prisma.player.findFirst({
         where: {
           gameId,
-          role: "RED_RIDING_HOOD",
+          role: GameRole.RED_RIDING_HOOD,
           state: PlayerState.ALIVE,
         },
       });
@@ -396,7 +402,7 @@ export class VotingService {
     });
 
     // Check White Wolf win condition (sole survivor)
-    const whiteWolf = alivePlayers.find((p) => p.role === "WHITE_WOLF");
+    const whiteWolf = alivePlayers.find((p) => p.role === GameRole.WHITE_WOLF);
     if (whiteWolf && alivePlayers.length === 1) {
       await this.endGame(gameId, "SOLO", "white_wolf_victory");
       return;

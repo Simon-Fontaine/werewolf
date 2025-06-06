@@ -24,8 +24,8 @@ export class GameService {
     private prisma: PrismaClientType,
     private redis: RedisClientType,
   ) {
-    this.gameEngine = new GameEngineService(prisma, redis);
     this.roleService = new RoleService(prisma);
+    this.gameEngine = new GameEngineService(prisma, redis, this.roleService);
   }
 
   async createGame(hostId: string, options: CreateGameOptions) {
@@ -74,10 +74,10 @@ export class GameService {
 
     if (!game) throw new Error("Game not found");
     if (game.state !== GameState.WAITING)
-      throw new Error("Game already started");
+      {throw new Error("Game already started");}
     if (game.players.length >= game.maxPlayers) throw new Error("Game is full");
     if (game.isPrivate && game.password !== password)
-      throw new Error("Invalid password");
+      {throw new Error("Invalid password");}
 
     // Check if player already in game
     const existingPlayer = game.players.find((p) => p.userId === userId);
@@ -498,7 +498,7 @@ export class GameService {
 
     if (!game) throw new Error("Game not found");
     if (game.hostId !== userId)
-      throw new Error("Only host can perform this action");
+      {throw new Error("Only host can perform this action");}
 
     return game;
   }

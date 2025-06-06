@@ -8,7 +8,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src --ext .ts"
+    "lint": "eslint src"
   },
   "keywords": [],
   "author": "Simon Fontaine",
@@ -16,8 +16,11 @@
   "type": "module",
   "main": "dist/index.js",
   "devDependencies": {
+    "@eslint/js": "^9.28.0",
     "@types/jsonwebtoken": "^9.0.9",
     "@types/node": "^22.15.30",
+    "@typescript-eslint/eslint-plugin": "^8.33.1",
+    "@typescript-eslint/parser": "^8.33.1",
     "eslint": "^9.28.0",
     "pino-pretty": "^13.0.0",
     "tsx": "^4.19.4",

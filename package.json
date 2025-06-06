@@ -3,6 +3,7 @@
   "name": "werewolf",
   "version": "1.0.0",
   "description": "",
+  "type": "module",
   "workspaces": [
     "packages/*"
   ],

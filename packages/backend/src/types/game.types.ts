@@ -14,6 +14,13 @@ export interface GameState {
   deadPlayers: PlayerInfo[];
 }
 
+export interface GameStateData extends GameState {
+  state: string;
+  minPlayers: number;
+  maxPlayers: number;
+  canStart: boolean;
+}
+
 export interface PlayerInfo {
   id: string;
   userId: string;

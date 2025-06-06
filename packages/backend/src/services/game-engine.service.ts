@@ -10,17 +10,22 @@ import {
 import { PrismaClientType } from "../lib/prisma.js";
 import { RedisClientType } from "../lib/redis.js";
 import { ActionResult } from "../types/game.types.js";
-import { GAME_CONFIG } from "../config/game.config.js";
 import { RoleService } from "./role.service.js";
+import { GamePubSub } from "../lib/pubsub.js";
 
 export class GameEngineService {
   private phaseTimers: Map<string, NodeJS.Timeout> = new Map();
+  private pubsub?: GamePubSub;
 
   constructor(
     private prisma: PrismaClientType,
     private redis: RedisClientType,
     private roleService: RoleService,
   ) {}
+
+  setPubSub(pubsub: GamePubSub) {
+    this.pubsub = pubsub;
+  }
 
   async scheduleGameStart(gameId: string) {
     // Notify players game will start in 10 seconds
@@ -761,19 +766,7 @@ export class GameEngineService {
   }
 
   private hasNightAbility(role: GameRole): boolean {
-    const nightRoles = [
-      GameRole.WEREWOLF,
-      GameRole.BLACK_WOLF,
-      GameRole.WHITE_WOLF,
-      GameRole.SEER,
-      GameRole.TALKATIVE_SEER,
-      GameRole.WITCH,
-      GameRole.POISONER,
-      GameRole.GUARD,
-      GameRole.CUPID, // First night only
-      GameRole.HEIR, // First night only
-    ] as GameRole[];
-    return nightRoles.includes(role);
+    return this.roleService.hasNightAbility(role);
   }
 
   private getNightAbilities(role: GameRole): string[] {
@@ -815,24 +808,10 @@ export class GameEngineService {
   }
 
   private getTeamForRole(role: GameRole): Team {
-    const werewolfRoles = [
-      GameRole.WEREWOLF,
-      GameRole.BLACK_WOLF,
-      GameRole.WOLF_RIDING_HOOD,
-    ] as GameRole[];
-    const soloRoles = [GameRole.WHITE_WOLF, GameRole.MERCENARY] as GameRole[];
-
-    if (werewolfRoles.includes(role)) return Team.WEREWOLVES;
-    if (soloRoles.includes(role)) return Team.SOLO;
+    const team = this.roleService.getTeamForRole(role);
+    if (team === "WEREWOLVES") return Team.WEREWOLVES;
+    if (team === "SOLO") return Team.SOLO;
     return Team.VILLAGERS;
-  }
-
-  private async getCurrentDay(gameId: string): Promise<number> {
-    const game = await this.prisma.game.findUnique({
-      where: { id: gameId },
-      select: { dayNumber: true },
-    });
-    return game?.dayNumber || 1;
   }
 
   private async publishGameEvent(gameId: string, event: string, data: any) {

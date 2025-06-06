@@ -11,6 +11,8 @@ import { createRedisClient } from "./lib/redis.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerGameRoutes } from "./routes/games.js";
 import { registerUserRoutes } from "./routes/users.js";
+import { registerStatsRoutes } from "./routes/stats.js";
+import { registerFriendRoutes } from "./routes/friends.js";
 import { setupSocketHandlers } from "./socket/index.js";
 import {
   serializerCompiler,
@@ -19,6 +21,8 @@ import {
 import { GameService } from "./services/game.service.js";
 import { VotingService } from "./services/voting.service.js";
 import { ChatService } from "./services/chat.service.js";
+import { RoleService } from "./services/role.service.js";
+import { GameEngineService } from "./services/game-engine.service.js";
 import { GamePubSub } from "./lib/pubsub.js";
 import { authenticateSocket } from "./socket/middleware/auth.middleware.js";
 import { registerGameHandlers } from "./socket/handlers/game.handler.js";
@@ -40,9 +44,11 @@ export async function createApp(): Promise<{
   const prisma = createPrismaClient();
   const redis = createRedisClient();
 
+  const roleService = new RoleService(prisma);
   const gameService = new GameService(prisma, redis);
   const votingService = new VotingService(prisma, redis);
   const chatService = new ChatService(prisma, redis);
+  const gameEngineService = new GameEngineService(prisma, redis, roleService);
 
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
@@ -75,6 +81,8 @@ export async function createApp(): Promise<{
   await app.register(registerAuthRoutes, { prefix: "/api/auth" });
   await app.register(registerGameRoutes, { prefix: "/api/games" });
   await app.register(registerUserRoutes, { prefix: "/api/users" });
+  await app.register(registerStatsRoutes, { prefix: "/api/stats" });
+  await app.register(registerFriendRoutes, { prefix: "/api/friends" });
 
   // Health check
   app.get("/health", async () => ({ status: "ok" }));
@@ -89,13 +97,22 @@ export async function createApp(): Promise<{
   });
 
   const pubsub = new GamePubSub(env.REDIS_URL, io);
+  
+  // Connect PubSub to services
+  votingService.setPubSub(pubsub);
+  chatService.setPubSub(pubsub);
+  gameEngineService.setPubSub(pubsub);
 
   io.use(authenticateSocket);
 
   io.on("connection", (socket) => {
     console.log("User connected:", socket.id, "User ID:", socket.data.userId);
 
-    registerGameHandlers(io, socket, { gameService, votingService });
+    registerGameHandlers(io, socket, {
+      gameService,
+      votingService,
+      gameEngineService,
+    });
     registerChatHandlers(io, socket, { chatService });
 
     socket.on("disconnect", () => {

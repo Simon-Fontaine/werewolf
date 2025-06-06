@@ -1,6 +1,7 @@
 import { Socket, Server } from "socket.io";
 import { GameService } from "../../services/game.service.js";
 import { VotingService } from "../../services/voting.service.js";
+import { GameEngineService } from "../../services/game-engine.service.js";
 
 export function registerGameHandlers(
   io: Server,
@@ -8,6 +9,7 @@ export function registerGameHandlers(
   services: {
     gameService: GameService;
     votingService: VotingService;
+    gameEngineService: GameEngineService;
   },
 ) {
   // Join game room
@@ -25,7 +27,7 @@ export function registerGameHandlers(
       socket.to(`game:${data.gameId}`).emit("player:joined", {
         player: {
           id: player.id,
-          displayName: player.user.displayName,
+          displayName: (player as any).user?.displayName || "Unknown",
           position: player.position,
         },
       });
@@ -34,7 +36,9 @@ export function registerGameHandlers(
       const gameState = await services.gameService.getGameState(data.gameId);
       socket.emit("game:state", gameState);
     } catch (error) {
-      socket.emit("error", { message: error.message });
+      socket.emit("error", {
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
     }
   });
 
@@ -44,7 +48,9 @@ export function registerGameHandlers(
       const { gameId, userId } = socket.data;
       await services.gameService.startGame(gameId, userId);
     } catch (error) {
-      socket.emit("error", { message: error.message });
+      socket.emit("error", {
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
     }
   });
 
@@ -54,7 +60,9 @@ export function registerGameHandlers(
       const { gameId, playerId } = socket.data;
       await services.votingService.castVote(gameId, playerId, data.targetId);
     } catch (error) {
-      socket.emit("error", { message: error.message });
+      socket.emit("error", {
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
     }
   });
 
@@ -71,7 +79,49 @@ export function registerGameHandlers(
           data.targetId,
         );
       } catch (error) {
-        socket.emit("error", { message: error.message });
+        socket.emit("error", {
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    },
+  );
+
+  // Hunter revenge shot (when hunter dies)
+  socket.on(
+    "hunter:revenge",
+    async (data: { targetId: string }) => {
+      try {
+        const { gameId, playerId } = socket.data;
+        await services.gameService.performNightAction(
+          gameId,
+          playerId,
+          "HUNTER_SHOOT",
+          data.targetId,
+        );
+      } catch (error) {
+        socket.emit("error", {
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    },
+  );
+
+  // Dictator coup attempt
+  socket.on(
+    "dictator:coup",
+    async (data: { targetId: string }) => {
+      try {
+        const { gameId, playerId } = socket.data;
+        await services.gameService.performNightAction(
+          gameId,
+          playerId,
+          "DICTATOR_COUP",
+          data.targetId,
+        );
+      } catch (error) {
+        socket.emit("error", {
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
       }
     },
   );

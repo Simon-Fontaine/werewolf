@@ -5,3 +5,6 @@ package-lock.json
 # Local env files
 .env*.local
 .env
+
+# Build output
+dist/

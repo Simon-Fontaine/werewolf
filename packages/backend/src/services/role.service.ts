@@ -59,7 +59,7 @@ export class RoleService {
     return assignments;
   }
 
-  private async initializeAbilities(playerId: string, role: GameRole) {
+  async initializeAbilities(playerId: string, role: GameRole) {
     const abilities =
       GAME_CONFIG.roleAbilities[role as keyof typeof GAME_CONFIG.roleAbilities];
     if (!abilities) return;
