@@ -16,6 +16,13 @@ import {
   serializerCompiler,
   validatorCompiler,
 } from "fastify-type-provider-zod";
+import { GameService } from "./services/game.service.js";
+import { VotingService } from "./services/voting.service.js";
+import { ChatService } from "./services/chat.service.js";
+import { GamePubSub } from "./lib/pubsub.js";
+import { authenticateSocket } from "./socket/middleware/auth.middleware.js";
+import { registerGameHandlers } from "./socket/handlers/game.handler.js";
+import { registerChatHandlers } from "./socket/handlers/chat.handler.js";
 
 export async function createApp(): Promise<{
   app: FastifyInstance;
@@ -32,6 +39,10 @@ export async function createApp(): Promise<{
   // Database clients
   const prisma = createPrismaClient();
   const redis = createRedisClient();
+
+  const gameService = new GameService(prisma, redis);
+  const votingService = new VotingService(prisma, redis);
+  const chatService = new ChatService(prisma, redis);
 
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
@@ -77,8 +88,20 @@ export async function createApp(): Promise<{
     },
   });
 
-  // Setup socket handlers
-  setupSocketHandlers(io, prisma, redis);
+  const pubsub = new GamePubSub(env.REDIS_URL, io);
+
+  io.use(authenticateSocket);
+
+  io.on("connection", (socket) => {
+    console.log("User connected:", socket.id, "User ID:", socket.data.userId);
+
+    registerGameHandlers(io, socket, { gameService, votingService });
+    registerChatHandlers(io, socket, { chatService });
+
+    socket.on("disconnect", () => {
+      console.log("User disconnected:", socket.id);
+    });
+  });
 
   return { app, io };
 }
