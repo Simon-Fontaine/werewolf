@@ -1,4 +1,4 @@
-# # 🐺 Werewolf - Online Multiplayer Game
+# 🐺 Werewolf - Online Multiplayer Game
 
 A modern web-based implementation of the classic social deduction game Werewolf (also known as Mafia), built for real-time multiplayer gameplay with advanced role mechanics and social features.
 
