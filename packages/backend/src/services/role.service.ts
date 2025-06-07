@@ -195,7 +195,7 @@ export class RoleService {
 
   private calculateDynamicDistribution(playerCount: number) {
     // For player counts not in the config, calculate a balanced distribution
-    const distribution: any = { villagers: 0 };
+    const distribution: Record<string, number> = { villagers: 0 };
 
     // Base werewolf count: ~25% of players
     distribution.werewolves = Math.max(1, Math.floor(playerCount * 0.25));
@@ -221,7 +221,7 @@ export class RoleService {
 
     // Fill the rest with villagers
     const specialRolesCount = Object.values(distribution).reduce(
-      (sum: number, count: any) => sum + (count as number),
+      (sum: number, count: number) => sum + count,
       0,
     );
     distribution.villagers = playerCount - specialRolesCount;

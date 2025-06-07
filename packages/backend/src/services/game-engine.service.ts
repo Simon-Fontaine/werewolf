@@ -6,7 +6,6 @@ import {
   ActionType,
   Team,
   ActionResult as GameActionResult,
-  Prisma,
 } from "@werewolf/database";
 import { PrismaClientType } from "../lib/prisma.js";
 import { RedisClientType } from "../lib/redis.js";
@@ -17,7 +16,7 @@ import { GamePubSub } from "../lib/pubsub.js";
 export class GameEngineService {
   private phaseTimers: Map<string, NodeJS.Timeout> = new Map();
   private pubsub?: GamePubSub;
-  private timerCheckInterval?: NodeJS.Timer;
+  private timerCheckInterval?: NodeJS.Timeout;
 
   constructor(
     private prisma: PrismaClientType,
@@ -308,7 +307,11 @@ export class GameEngineService {
     );
 
     for (const event of nightEvents) {
-      const data = event.data as any;
+      const data = event.data as {
+        playerId: string;
+        playerName: string;
+        cause: string;
+      };
       await this.publishGameEvent(gameId, "player_died", {
         playerId: data.playerId,
         playerName: data.playerName,
@@ -393,7 +396,8 @@ export class GameEngineService {
     });
 
     if (targetAbility?.metadata) {
-      const targetId = (targetAbility.metadata as any).targetId;
+      const targetId = (targetAbility.metadata as { targetId: string })
+        .targetId;
       const target = await this.prisma.player.findUnique({
         where: { id: targetId },
         include: { user: true },
@@ -469,17 +473,24 @@ export class GameEngineService {
   }
 
   private async processAction(
-    action: any,
+    action: {
+      id: string;
+      actionType: ActionType;
+      targetId?: string | null;
+      performerId: string;
+      gameId: string;
+      metadata?: unknown;
+    },
     context: {
       protectedPlayers: Set<string>;
       deaths: Map<string, string>;
-      game: any;
+      game: { dayNumber: number };
     },
   ): Promise<ActionResult> {
     const result: ActionResult = {
       action: action.actionType,
       success: false,
-      targetId: action.targetId,
+      targetId: action.targetId || undefined,
     };
 
     switch (action.actionType) {
@@ -629,7 +640,10 @@ export class GameEngineService {
 
       case ActionType.CUPID_LINK: {
         if (action.metadata) {
-          const { player1Id, player2Id } = action.metadata as any;
+          const { player1Id, player2Id } = action.metadata as {
+            player1Id: string;
+            player2Id: string;
+          };
 
           // Link the players
           await this.prisma.player.update({
@@ -783,10 +797,23 @@ export class GameEngineService {
     });
 
     // Handle death triggers
-    await this.handleDeathTriggers(gameId, player);
+    await this.handleDeathTriggers(gameId, {
+      id: player.id,
+      role: player.role,
+      linkedTo: player.linkedTo,
+      user: { displayName: player.user.displayName || "Unknown" },
+    });
   }
 
-  private async handleDeathTriggers(gameId: string, deadPlayer: any) {
+  private async handleDeathTriggers(
+    gameId: string,
+    deadPlayer: {
+      id: string;
+      role: GameRole;
+      linkedTo?: string | null;
+      user: { displayName: string };
+    },
+  ) {
     // Hunter revenge shot
     if (deadPlayer.role === GameRole.HUNTER) {
       await this.publishPlayerEvent(gameId, deadPlayer.id, "hunter_revenge", {
@@ -896,7 +923,10 @@ export class GameEngineService {
     await this.checkProtectionLosses(gameId, deadPlayer);
   }
 
-  private async checkProtectionLosses(gameId: string, deadPlayer: any) {
+  private async checkProtectionLosses(
+    gameId: string,
+    deadPlayer: { role: GameRole },
+  ) {
     // Wolf Riding Hood loses protection if Black Wolf dies
     if (deadPlayer.role === GameRole.BLACK_WOLF) {
       const wolfRidingHood = await this.prisma.player.findFirst({
@@ -969,7 +999,7 @@ export class GameEngineService {
 
     if (!targetAbility || !targetAbility.metadata) return;
 
-    const targetId = (targetAbility.metadata as any).targetId;
+    const targetId = (targetAbility.metadata as { targetId: string }).targetId;
 
     if (targetId === votedOutPlayerId) {
       // Mercenary wins!
@@ -1201,7 +1231,10 @@ export class GameEngineService {
     this.phaseTimers.clear();
   }
 
-  private getPhaseDuration(game: any, phase: GamePhase): number {
+  private getPhaseDuration(
+    game: { nightDuration: number; dayDuration: number; voteDuration: number },
+    phase: GamePhase,
+  ): number {
     switch (phase) {
       case GamePhase.ROLE_ASSIGNMENT:
         return 5; // 5 seconds to view role
@@ -1269,7 +1302,23 @@ export class GameEngineService {
     return abilities[role] || [];
   }
 
-  private prioritizeActions(actions: any[]): any[] {
+  private prioritizeActions(
+    actions: {
+      id: string;
+      actionType: ActionType;
+      targetId?: string | null;
+      performerId: string;
+      gameId: string;
+      metadata?: unknown;
+    }[],
+  ): {
+    id: string;
+    actionType: ActionType;
+    targetId?: string | null;
+    performerId: string;
+    gameId: string;
+    metadata?: unknown;
+  }[] {
     // Action priority order for resolution
     const priority: ActionType[] = [
       ActionType.GUARD_PROTECT,
@@ -1297,7 +1346,7 @@ export class GameEngineService {
     return Team.VILLAGERS;
   }
 
-  private async publishGameEvent(gameId: string, event: string, data: any) {
+  private async publishGameEvent(gameId: string, event: string, data: unknown) {
     if (this.pubsub) {
       await this.pubsub.publishGameEvent(gameId, event, data);
     }
@@ -1307,7 +1356,7 @@ export class GameEngineService {
     gameId: string,
     playerId: string,
     event: string,
-    data: any,
+    data: unknown,
   ) {
     await this.redis.publish(
       `game:${gameId}:player:${playerId}:${event}`,

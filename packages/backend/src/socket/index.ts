@@ -4,8 +4,8 @@ import type { RedisClientType } from "../lib/redis.js";
 
 export function setupSocketHandlers(
   io: SocketIOServer,
-  prisma: PrismaClientType,
-  redis: RedisClientType,
+  _prisma: PrismaClientType,
+  _redis: RedisClientType,
 ) {
   io.on("connection", (socket) => {
     console.log("User connected:", socket.id);

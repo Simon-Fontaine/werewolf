@@ -143,7 +143,9 @@ export class MatchmakingService {
     }
   }
 
-  private calculateSkillRating(stats: any): number {
+  private calculateSkillRating(
+    stats: { gamesPlayed: number; gamesWon: number } | null,
+  ): number {
     if (!stats || stats.gamesPlayed === 0) return 1000; // Default rating
 
     const winRate = stats.gamesWon / stats.gamesPlayed;

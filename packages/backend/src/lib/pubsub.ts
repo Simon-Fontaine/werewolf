@@ -26,7 +26,7 @@ export class GamePubSub {
     });
   }
 
-  async publishGameEvent(gameId: string, eventType: string, data: any) {
+  async publishGameEvent(gameId: string, eventType: string, data: unknown) {
     const channel = `game:${gameId}:${eventType}`;
     await this.publisher.publish(channel, JSON.stringify(data));
   }

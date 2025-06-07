@@ -73,11 +73,13 @@ export class GameService {
     });
 
     if (!game) throw new Error("Game not found");
-    if (game.state !== GameState.WAITING)
-      {throw new Error("Game already started");}
+    if (game.state !== GameState.WAITING) {
+      throw new Error("Game already started");
+    }
     if (game.players.length >= game.maxPlayers) throw new Error("Game is full");
-    if (game.isPrivate && game.password !== password)
-      {throw new Error("Invalid password");}
+    if (game.isPrivate && game.password !== password) {
+      throw new Error("Invalid password");
+    }
 
     // Check if player already in game
     const existingPlayer = game.players.find((p) => p.userId === userId);
@@ -100,7 +102,15 @@ export class GameService {
     });
 
     // Update cached game state
-    await this.updateCachedPlayer(gameId, player);
+    await this.updateCachedPlayer(gameId, {
+      id: player.id,
+      userId: player.userId,
+      position: player.position,
+      user: {
+        displayName: player.user.displayName || undefined,
+        avatarUrl: player.user.avatarUrl || undefined,
+      },
+    });
 
     // Check if we can auto-start
     if (game.players.length + 1 >= game.minPlayers && game.hostId !== userId) {
@@ -482,7 +492,7 @@ export class GameService {
     throw new Error("Could not generate unique room code");
   }
 
-  private getNextAvailablePosition(players: any[]): number {
+  private getNextAvailablePosition(players: { position: number }[]): number {
     const positions = players.map((p) => p.position).sort((a, b) => a - b);
     for (let i = 1; i <= 15; i++) {
       if (!positions.includes(i)) return i;
@@ -497,8 +507,9 @@ export class GameService {
     });
 
     if (!game) throw new Error("Game not found");
-    if (game.hostId !== userId)
-      {throw new Error("Only host can perform this action");}
+    if (game.hostId !== userId) {
+      throw new Error("Only host can perform this action");
+    }
 
     return game;
   }
@@ -515,7 +526,7 @@ export class GameService {
     await this.redis.del(`game:${gameId}`);
   }
 
-  private mapActionToType(action: string, role: GameRole): ActionType | null {
+  private mapActionToType(action: string, _role: GameRole): ActionType | null {
     const actionMap: Record<string, ActionType> = {
       werewolf_vote: ActionType.WEREWOLF_VOTE,
       seer_investigate: ActionType.SEER_INVESTIGATE,
@@ -549,7 +560,7 @@ export class GameService {
     return actionType !== ActionType.HUNTER_SHOOT; // Hunter chooses target when dying
   }
 
-  private async cacheGameState(gameId: string, state: any) {
+  private async cacheGameState(gameId: string, state: unknown) {
     await this.redis.setex(
       `game:${gameId}`,
       3600, // 1 hour TTL
@@ -564,7 +575,15 @@ export class GameService {
     return cached ? JSON.parse(cached) : null;
   }
 
-  private async updateCachedPlayer(gameId: string, player: any) {
+  private async updateCachedPlayer(
+    gameId: string,
+    player: {
+      id: string;
+      userId: string;
+      position: number;
+      user: { displayName?: string; avatarUrl?: string };
+    },
+  ) {
     const state = await this.getCachedGameState(gameId);
     if (state) {
       const playerInfo: PlayerInfo = {
@@ -590,7 +609,7 @@ export class GameService {
     }
   }
 
-  private async publishGameEvent(gameId: string, event: string, data: any) {
+  private async publishGameEvent(gameId: string, event: string, data: unknown) {
     await this.redis.publish(`game:${gameId}:${event}`, JSON.stringify(data));
   }
 
@@ -598,7 +617,7 @@ export class GameService {
     gameId: string,
     playerId: string,
     event: string,
-    data: any,
+    data: unknown,
   ) {
     await this.redis.publish(
       `game:${gameId}:player:${playerId}:${event}`,

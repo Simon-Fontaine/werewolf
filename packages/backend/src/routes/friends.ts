@@ -12,7 +12,7 @@ export const registerFriendRoutes: FastifyPluginAsyncZod = async (app) => {
     {
       preHandler: app.authenticate,
     },
-    async (request, reply) => {
+    async (request, _reply) => {
       const friends = await app.prisma.friend.findMany({
         where: {
           OR: [
@@ -67,7 +67,7 @@ export const registerFriendRoutes: FastifyPluginAsyncZod = async (app) => {
     {
       preHandler: app.authenticate,
     },
-    async (request, reply) => {
+    async (request, _reply) => {
       const requests = await app.prisma.friend.findMany({
         where: {
           receiverId: request.user.userId,

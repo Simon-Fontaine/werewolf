@@ -32,7 +32,7 @@ const authPlugin: FastifyPluginAsync = async (app) => {
     async (request: FastifyRequest, reply: FastifyReply) => {
       try {
         await request.jwtVerify();
-      } catch (err) {
+      } catch (_err) {
         reply.code(401).send({ error: "Unauthorized" });
       }
     },

@@ -7,7 +7,7 @@ export const registerStatsRoutes: FastifyPluginAsyncZod = async (app) => {
     {
       preHandler: app.authenticate,
     },
-    async (request, reply) => {
+    async (request, _reply) => {
       const stats = await app.prisma.userStats.findUnique({
         where: { userId: request.user.userId },
       });
@@ -77,7 +77,7 @@ export const registerStatsRoutes: FastifyPluginAsyncZod = async (app) => {
   );
 
   // Get global leaderboard
-  app.get("/leaderboard", async (request, reply) => {
+  app.get("/leaderboard", async (_request, _reply) => {
     const topPlayers = await app.prisma.userStats.findMany({
       where: {
         gamesPlayed: { gte: 10 }, // Minimum 10 games
@@ -105,15 +105,15 @@ export const registerStatsRoutes: FastifyPluginAsyncZod = async (app) => {
   });
 
   // Get role-specific leaderboard
-  app.get("/leaderboard/:role", async (request, reply) => {
+  app.get("/leaderboard/:role", async (request, _reply) => {
     const { role } = request.params as { role: string };
 
     if (!["werewolf", "villager", "solo"].includes(role)) {
-      return reply.code(400).send({ error: "Invalid role" });
+      return _reply.code(400).send({ error: "Invalid role" });
     }
 
-    const orderBy: any = {};
-    const where: any = {};
+    const orderBy: Record<string, string> = {};
+    const where: Record<string, unknown> = {};
 
     switch (role) {
       case "werewolf":

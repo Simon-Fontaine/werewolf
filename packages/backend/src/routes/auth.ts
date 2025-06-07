@@ -54,7 +54,6 @@ export const registerAuthRoutes: FastifyPluginAsyncZod = async (app) => {
       preHandler: app.rateLimit({
         max: 10,
         timeWindow: "15 minutes",
-        skipSuccessfulRequests: true, // Only count failed attempts
       }),
       schema: {
         body: loginSchema,
@@ -76,7 +75,7 @@ export const registerAuthRoutes: FastifyPluginAsyncZod = async (app) => {
           user: result.user,
           accessToken: result.accessToken,
         };
-      } catch (error) {
+      } catch (_error) {
         // Add delay to prevent timing attacks
         await new Promise((resolve) => setTimeout(resolve, 1000));
         return reply.code(401).send({ error: "Invalid credentials" });
@@ -145,7 +144,7 @@ export const registerAuthRoutes: FastifyPluginAsyncZod = async (app) => {
         return {
           accessToken: result.accessToken,
         };
-      } catch (error) {
+      } catch (_error) {
         reply.clearCookie("refreshToken");
         return reply.code(401).send({ error: "Invalid refresh token" });
       }

@@ -238,7 +238,7 @@ export class VotingService {
       },
     });
 
-    for (const mayor of mayorPlayers) {
+    for (const mayor of mayorPlayers as any[]) {
       const mayorVote = await tx.gameAction.findFirst({
         where: {
           gameId,
@@ -277,7 +277,7 @@ export class VotingService {
     // Wolf Riding Hood protection
     if (player.role === GameRole.WOLF_RIDING_HOOD) {
       const blackWolfAlive = player.game.players.some(
-        (p: any) =>
+        (p: { role: GameRole; state: PlayerState }) =>
           p.role === GameRole.BLACK_WOLF && p.state === PlayerState.ALIVE,
       );
       return blackWolfAlive;
@@ -286,7 +286,9 @@ export class VotingService {
     return false;
   }
 
-  private countVotes(votes: any[]): Record<string, number> {
+  private countVotes(
+    votes: { targetId?: string | null }[],
+  ): Record<string, number> {
     const count: Record<string, number> = {};
 
     votes.forEach((vote) => {
@@ -383,7 +385,7 @@ export class VotingService {
   private async handleDeathTriggers(gameId: string, playerId: string) {
     const player = await this.prisma.player.findUnique({
       where: { id: playerId },
-      include: { game: true },
+      include: { game: true, user: true },
     });
 
     if (!player) return;
@@ -434,7 +436,12 @@ export class VotingService {
     const gameEngineService = new (
       await import("./game-engine.service.js")
     ).GameEngineService(this.prisma, this.redis, null as any);
-    await gameEngineService["handleDeathTriggers"](gameId, player);
+    await gameEngineService["handleDeathTriggers"](gameId, {
+      id: player.id,
+      role: player.role,
+      linkedTo: player.linkedTo,
+      user: { displayName: player.user?.displayName || "Unknown" },
+    });
   }
 
   private async checkGameEndConditions(gameId: string) {

@@ -6,6 +6,7 @@ import {
   uuidSchema,
   gameCodeSchema,
 } from "../middleware/validation.js";
+import { GameRole, Team } from "@werewolf/database";
 
 const createGameSchema = z.object({
   name: z.string().min(1).max(50),
@@ -22,11 +23,28 @@ const joinGameSchema = z.object({
   password: z.string().optional(),
 });
 
+// Helper function to determine team affiliation for a role
+function getTeamForRole(role: GameRole): Team {
+  switch (role) {
+    case GameRole.WEREWOLF:
+    case GameRole.BLACK_WOLF:
+    case GameRole.WOLF_RIDING_HOOD:
+      return Team.WEREWOLVES;
+
+    case GameRole.WHITE_WOLF:
+    case GameRole.MERCENARY:
+      return Team.SOLO;
+
+    default:
+      return Team.VILLAGERS;
+  }
+}
+
 export const registerGameRoutes: FastifyPluginAsyncZod = async (app) => {
   const gameService = new GameService(app.prisma, app.redis);
 
   // List public games
-  app.get("/", async (request, reply) => {
+  app.get("/", async (_request, _reply) => {
     const games = await app.prisma.game.findMany({
       where: {
         state: {
@@ -226,7 +244,7 @@ export const registerGameRoutes: FastifyPluginAsyncZod = async (app) => {
     {
       preHandler: app.authenticate,
     },
-    async (request, reply) => {
+    async (request, _reply) => {
       const games = await app.prisma.game.findMany({
         where: {
           players: {
@@ -252,16 +270,22 @@ export const registerGameRoutes: FastifyPluginAsyncZod = async (app) => {
         take: 20,
       });
 
-      return games.map((game) => ({
-        id: game.id,
-        name: game.name,
-        playedAt: game.endedAt,
-        playerCount: game._count.players,
-        role: game.players[0].role,
-        survived: game.players[0].state === "ALIVE",
-        won: false, // TODO: Implement proper win condition checking
-        winningTeam: game.winningTeam,
-      }));
+      return games.map((game) => {
+        const player = game.players[0];
+        const playerTeam = getTeamForRole(player.role);
+        const won = game.winningTeam === playerTeam;
+        
+        return {
+          id: game.id,
+          name: game.name,
+          playedAt: game.endedAt,
+          playerCount: game._count.players,
+          role: player.role,
+          survived: player.state === "ALIVE",
+          won,
+          winningTeam: game.winningTeam,
+        };
+      });
     },
   );
 
@@ -271,7 +295,7 @@ export const registerGameRoutes: FastifyPluginAsyncZod = async (app) => {
     {
       preHandler: app.authenticate,
     },
-    async (request, reply) => {
+    async (request, _reply) => {
       const games = await app.prisma.game.findMany({
         where: {
           players: {

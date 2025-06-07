@@ -132,7 +132,7 @@ export class AuthService {
       // Generate tokens
       const tokens = await this.generateTokens(user.id);
 
-      const { passwordHash, ...userWithoutPassword } = user;
+      const { passwordHash: _passwordHash, ...userWithoutPassword } = user;
 
       // Ensure constant time
       const elapsed = Date.now() - startTime;
@@ -238,7 +238,7 @@ export class AuthService {
 
       // Generate new tokens
       return this.generateTokens(payload.userId);
-    } catch (error) {
+    } catch (_error) {
       throw new Error("Invalid refresh token");
     }
   }

@@ -14,7 +14,6 @@ import { registerGameRoutes } from "./routes/games.js";
 import { registerUserRoutes } from "./routes/users.js";
 import { registerStatsRoutes } from "./routes/stats.js";
 import { registerFriendRoutes } from "./routes/friends.js";
-import { setupSocketHandlers } from "./socket/index.js";
 import {
   serializerCompiler,
   validatorCompiler,

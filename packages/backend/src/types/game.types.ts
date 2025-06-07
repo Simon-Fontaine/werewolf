@@ -1,4 +1,4 @@
-import { Game, Player, GamePhase, GameRole } from "@werewolf/database";
+import { GamePhase, GameRole } from "@werewolf/database";
 
 export interface GameState {
   id: string;

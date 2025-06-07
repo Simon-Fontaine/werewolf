@@ -8,8 +8,18 @@ interface SocketData {
   playerId?: string;
 }
 
+interface ClientToServerEvents {
+  "auth:refresh": (token: string) => void;
+  [event: string]: (...args: any[]) => void;
+}
+
+interface ServerToClientEvents {
+  "auth:refreshed": (data: { success: boolean }) => void;
+  [event: string]: (...args: any[]) => void;
+}
+
 export async function authenticateSocket(
-  socket: Socket<any, any, any, SocketData>,
+  socket: Socket<ClientToServerEvents, ServerToClientEvents, any, SocketData>,
   next: (err?: Error) => void,
 ) {
   try {
@@ -48,7 +58,7 @@ export async function authenticateSocket(
           socket.emit("auth:refreshed", { success: false });
           socket.disconnect();
         }
-      } catch (error) {
+      } catch (_error) {
         socket.emit("auth:refreshed", { success: false });
         socket.disconnect();
       }

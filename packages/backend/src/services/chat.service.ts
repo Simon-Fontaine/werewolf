@@ -139,7 +139,10 @@ export class ChatService {
     return messagesWithNames.reverse(); // Return in chronological order
   }
 
-  private canAccessChannel(player: any, channel: string): boolean {
+  private canAccessChannel(
+    player: { state: PlayerState; role: GameRole; game: { phase: GamePhase } },
+    channel: string,
+  ): boolean {
     switch (channel) {
       case "all":
         return (
@@ -150,11 +153,13 @@ export class ChatService {
       case "werewolves":
         return (
           player.state === PlayerState.ALIVE &&
-          [
-            GameRole.WEREWOLF,
-            GameRole.BLACK_WOLF,
-            GameRole.WHITE_WOLF,
-          ].includes(player.role) &&
+          (
+            [
+              GameRole.WEREWOLF,
+              GameRole.BLACK_WOLF,
+              GameRole.WHITE_WOLF,
+            ] as GameRole[]
+          ).includes(player.role) &&
           player.game.phase === GamePhase.NIGHT_PHASE
         );
 

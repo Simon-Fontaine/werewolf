@@ -27,7 +27,9 @@ export function registerGameHandlers(
       socket.to(`game:${data.gameId}`).emit("player:joined", {
         player: {
           id: player.id,
-          displayName: (player as any).user?.displayName || "Unknown",
+          displayName:
+            (player as { user?: { displayName?: string } }).user?.displayName ||
+            "Unknown",
           position: player.position,
         },
       });
@@ -87,44 +89,38 @@ export function registerGameHandlers(
   );
 
   // Hunter revenge shot (when hunter dies)
-  socket.on(
-    "hunter:revenge",
-    async (data: { targetId: string }) => {
-      try {
-        const { gameId, playerId } = socket.data;
-        await services.gameService.performNightAction(
-          gameId,
-          playerId,
-          "HUNTER_SHOOT",
-          data.targetId,
-        );
-      } catch (error) {
-        socket.emit("error", {
-          message: error instanceof Error ? error.message : "Unknown error",
-        });
-      }
-    },
-  );
+  socket.on("hunter:revenge", async (data: { targetId: string }) => {
+    try {
+      const { gameId, playerId } = socket.data;
+      await services.gameService.performNightAction(
+        gameId,
+        playerId,
+        "HUNTER_SHOOT",
+        data.targetId,
+      );
+    } catch (error) {
+      socket.emit("error", {
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  });
 
   // Dictator coup attempt
-  socket.on(
-    "dictator:coup",
-    async (data: { targetId: string }) => {
-      try {
-        const { gameId, playerId } = socket.data;
-        await services.gameService.performNightAction(
-          gameId,
-          playerId,
-          "DICTATOR_COUP",
-          data.targetId,
-        );
-      } catch (error) {
-        socket.emit("error", {
-          message: error instanceof Error ? error.message : "Unknown error",
-        });
-      }
-    },
-  );
+  socket.on("dictator:coup", async (data: { targetId: string }) => {
+    try {
+      const { gameId, playerId } = socket.data;
+      await services.gameService.performNightAction(
+        gameId,
+        playerId,
+        "DICTATOR_COUP",
+        data.targetId,
+      );
+    } catch (error) {
+      socket.emit("error", {
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  });
 
   // Handle disconnection
   socket.on("disconnect", async () => {
