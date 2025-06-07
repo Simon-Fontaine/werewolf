@@ -88,6 +88,49 @@ export function registerGameHandlers(
     },
   );
 
+  // Special first night actions
+  socket.on(
+    "cupid:link",
+    async (data: { player1Id: string; player2Id: string }) => {
+      try {
+        const { gameId, playerId } = socket.data;
+        await services.gameService.performNightAction(
+          gameId,
+          playerId,
+          "cupid_link",
+          undefined,
+          { player1Id: data.player1Id, player2Id: data.player2Id },
+        );
+      } catch (error) {
+        socket.emit("error", {
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    },
+  );
+
+  // Witch actions with potion type
+  socket.on(
+    "witch:potion",
+    async (data: { potionType: "heal" | "poison"; targetId?: string }) => {
+      try {
+        const { gameId, playerId } = socket.data;
+        const action =
+          data.potionType === "heal" ? "witch_heal" : "witch_poison";
+        await services.gameService.performNightAction(
+          gameId,
+          playerId,
+          action,
+          data.targetId,
+        );
+      } catch (error) {
+        socket.emit("error", {
+          message: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    },
+  );
+
   // Hunter revenge shot (when hunter dies)
   socket.on("hunter:revenge", async (data: { targetId: string }) => {
     try {

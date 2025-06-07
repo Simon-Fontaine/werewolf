@@ -301,6 +301,7 @@ export class GameService {
     playerId: string,
     action: string,
     targetId?: string,
+    metadata?: any,
   ) {
     const game = await this.prisma.game.findUnique({
       where: { id: gameId },
@@ -396,9 +397,11 @@ export class GameService {
         actionType,
         dayNumber: game.dayNumber,
         phase: game.phase,
+        metadata, // Add metadata here
       },
       update: {
         targetId,
+        metadata, // And here
         createdAt: new Date(),
       },
     });

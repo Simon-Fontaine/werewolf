@@ -135,6 +135,50 @@ export const registerGameRoutes: FastifyPluginAsyncZod = async (app) => {
     },
   );
 
+  // Spectate a game
+  app.post(
+    "/:gameId/spectate",
+    {
+      preHandler: app.authenticate,
+    },
+    async (request, reply) => {
+      const { gameId } = request.params as { gameId: string };
+
+      try {
+        const spectator = await app.prisma.spectator.create({
+          data: {
+            gameId,
+            userId: request.user.userId,
+          },
+        });
+
+        return { spectatorId: spectator.id };
+      } catch (error) {
+        return reply.code(400).send({
+          error: error instanceof Error ? error.message : "Failed to spectate",
+        });
+      }
+    },
+  );
+
+  // Get game events for replay/history
+  app.get(
+    "/:gameId/events",
+    {
+      preHandler: app.authenticate,
+    },
+    async (request, _reply) => {
+      const { gameId } = request.params as { gameId: string };
+
+      const events = await app.prisma.gameEvent.findMany({
+        where: { gameId },
+        orderBy: { createdAt: "asc" },
+      });
+
+      return events;
+    },
+  );
+
   // Find game by code
   app.get(
     "/code/:code",
@@ -274,7 +318,7 @@ export const registerGameRoutes: FastifyPluginAsyncZod = async (app) => {
         const player = game.players[0];
         const playerTeam = getTeamForRole(player.role);
         const won = game.winningTeam === playerTeam;
-        
+
         return {
           id: game.id,
           name: game.name,

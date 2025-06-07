@@ -16,11 +16,17 @@ export class GamePubSub {
   }
 
   private setupSubscriptions() {
-    this.subscriber.on("message", (channel, message) => {
-      const [prefix, gameId, eventType] = channel.split(":");
+    this.subscriber.psubscribe("game:*");
 
-      if (prefix === "game") {
+    this.subscriber.on("pmessage", (pattern, channel, message) => {
+      const parts = channel.split(":");
+
+      if (parts[0] === "game" && parts.length >= 3) {
+        const gameId = parts[1];
+        const eventType = parts.slice(2).join(":");
         const data = JSON.parse(message);
+
+        // Emit to the game room
         this.io.to(`game:${gameId}`).emit(eventType, data);
       }
     });

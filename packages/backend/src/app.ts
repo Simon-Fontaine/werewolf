@@ -27,6 +27,9 @@ import { GamePubSub } from "./lib/pubsub.js";
 import { authenticateSocket } from "./socket/middleware/auth.middleware.js";
 import { registerGameHandlers } from "./socket/handlers/game.handler.js";
 import { registerChatHandlers } from "./socket/handlers/chat.handler.js";
+import { MatchmakingService } from "./services/matchmaking.service.js";
+import { CleanupService } from "./services/cleanup.service.js";
+import { setupSocketHandlers } from "./socket/index.js";
 
 export async function createApp(): Promise<{
   app: FastifyInstance;
@@ -50,6 +53,8 @@ export async function createApp(): Promise<{
   const votingService = new VotingService(prisma, redis);
   const chatService = new ChatService(prisma, redis);
   const gameEngineService = new GameEngineService(prisma, redis, roleService);
+  const matchmakingService = new MatchmakingService(prisma, redis, gameService);
+  const cleanupService = new CleanupService(prisma, redis);
 
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);

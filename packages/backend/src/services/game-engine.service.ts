@@ -88,6 +88,42 @@ export class GameEngineService {
   }
 
   async transitionToPhase(gameId: string, nextPhase: GamePhase) {
+    const maxRetries = 3;
+    let attempt = 0;
+
+    while (attempt < maxRetries) {
+      try {
+        await this._transitionToPhase(gameId, nextPhase);
+        break;
+      } catch (error) {
+        attempt++;
+        if (attempt === maxRetries) {
+          console.error(
+            `Failed to transition phase after ${maxRetries} attempts:`,
+            error,
+          );
+          await this.handlePhaseTransitionFailure(gameId, nextPhase);
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+        }
+      }
+    }
+  }
+
+  private async handlePhaseTransitionFailure(gameId: string, phase: GamePhase) {
+    // Log to error tracking service
+    // Notify admins
+    // Put game in recovery mode
+    await this.prisma.game.update({
+      where: { id: gameId },
+      data: {
+        state: GameState.ENDED,
+        endReason: "Technical error - phase transition failed",
+      },
+    });
+  }
+
+  async _transitionToPhase(gameId: string, nextPhase: GamePhase) {
     // Use transaction to prevent race conditions
     await this.prisma.$transaction(async (tx) => {
       // Clear existing timer
