@@ -4,20 +4,32 @@ import { z } from "zod";
 import { AccountType, UserStatus } from "@werewolf/database";
 import type { PrismaClientType } from "../lib/prisma.js";
 import { generateRandomString } from "../utils/random.js";
+import crypto from "crypto";
 
+// Enhanced validation schemas
 export const registerSchema = z.object({
   username: z
     .string()
     .min(3)
     .max(30)
-    .regex(/^[a-zA-Z0-9_-]+$/),
-  email: z.string().email(),
-  password: z.string().min(8).max(100),
+    .regex(
+      /^[a-zA-Z0-9_-]+$/,
+      "Username can only contain letters, numbers, underscores, and hyphens",
+    ),
+  email: z.string().email().toLowerCase(),
+  password: z
+    .string()
+    .min(12)
+    .max(100)
+    .regex(
+      /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]/,
+      "Password must contain uppercase, lowercase, number, and special character",
+    ),
 });
 
 export const loginSchema = z.object({
-  username: z.string(),
-  password: z.string(),
+  username: z.string().min(1).max(100),
+  password: z.string().min(1).max(100),
 });
 
 export class AuthService {
@@ -27,29 +39,40 @@ export class AuthService {
   ) {}
 
   async register(data: z.infer<typeof registerSchema>) {
+    // Normalize email
+    const email = data.email.toLowerCase();
+    const username = data.username.trim();
+
     // Check if username or email already exists
     const existing = await this.prisma.user.findFirst({
       where: {
-        OR: [{ username: data.username }, { email: data.email }],
+        OR: [{ username }, { email }],
       },
     });
 
     if (existing) {
-      throw new Error("Username or email already exists");
+      if (existing.username === username) {
+        throw new Error("Username already exists");
+      }
+      throw new Error("Email already exists");
     }
 
-    // Hash password
-    const passwordHash = await hash(data.password);
+    // Hash password with strong settings
+    const passwordHash = await hash(data.password, {
+      memoryCost: 19456, // 19 MiB
+      timeCost: 2,
+      parallelism: 1,
+    });
 
     // Create user
     const user = await this.prisma.user.create({
       data: {
-        username: data.username,
-        email: data.email,
+        username,
+        email,
         passwordHash,
         accountType: AccountType.REGISTERED,
         status: UserStatus.ACTIVE,
-        displayName: data.username,
+        displayName: username,
       },
       select: {
         id: true,
@@ -67,45 +90,65 @@ export class AuthService {
   }
 
   async login(data: z.infer<typeof loginSchema>) {
-    // Find user
-    const user = await this.prisma.user.findUnique({
-      where: { username: data.username },
-      select: {
-        id: true,
-        username: true,
-        email: true,
-        displayName: true,
-        accountType: true,
-        passwordHash: true,
-        status: true,
-      },
-    });
+    // Add constant time delay to prevent timing attacks
+    const startTime = Date.now();
+    const minDelay = 100; // milliseconds
 
-    if (!user || !user.passwordHash) {
-      throw new Error("Invalid credentials");
+    try {
+      // Find user
+      const user = await this.prisma.user.findUnique({
+        where: { username: data.username },
+        select: {
+          id: true,
+          username: true,
+          email: true,
+          displayName: true,
+          accountType: true,
+          passwordHash: true,
+          status: true,
+        },
+      });
+
+      // Always verify even if user doesn't exist (constant time)
+      const dummyHash = "$argon2id$v=19$m=19456,t=2,p=1$dummy$hash";
+      const hashToVerify = user?.passwordHash || dummyHash;
+
+      const valid = await verify(hashToVerify, data.password);
+
+      if (!user || !valid) {
+        throw new Error("Invalid credentials");
+      }
+
+      if (user.status !== UserStatus.ACTIVE) {
+        throw new Error("Account is not active");
+      }
+
+      // Update last active
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: { lastActive: new Date() },
+      });
+
+      // Generate tokens
+      const tokens = await this.generateTokens(user.id);
+
+      const { passwordHash, ...userWithoutPassword } = user;
+
+      // Ensure constant time
+      const elapsed = Date.now() - startTime;
+      if (elapsed < minDelay) {
+        await new Promise((resolve) => setTimeout(resolve, minDelay - elapsed));
+      }
+
+      return { user: userWithoutPassword, ...tokens };
+    } catch (error) {
+      // Ensure constant time even on error
+      const elapsed = Date.now() - startTime;
+      if (elapsed < minDelay) {
+        await new Promise((resolve) => setTimeout(resolve, minDelay - elapsed));
+      }
+      throw error;
     }
-
-    if (user.status !== UserStatus.ACTIVE) {
-      throw new Error("Account is not active");
-    }
-
-    // Verify password
-    const valid = await verify(user.passwordHash, data.password);
-    if (!valid) {
-      throw new Error("Invalid credentials");
-    }
-
-    // Update last active
-    await this.prisma.user.update({
-      where: { id: user.id },
-      data: { lastActive: new Date() },
-    });
-
-    // Generate tokens
-    const tokens = await this.generateTokens(user.id);
-
-    const { passwordHash, ...userWithoutPassword } = user;
-    return { user: userWithoutPassword, ...tokens };
   }
 
   async createGuestUser() {
@@ -141,11 +184,16 @@ export class AuthService {
       { expiresIn: "7d" },
     );
 
-    // Store refresh token in database
+    // Store refresh token in database with secure hash
+    const tokenHash = crypto
+      .createHash("sha256")
+      .update(refreshToken)
+      .digest("hex");
+
     await this.prisma.refreshToken.create({
       data: {
         userId,
-        token: refreshToken,
+        token: tokenHash, // Store hash instead of plain token
         expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
       },
     });
@@ -165,11 +213,20 @@ export class AuthService {
       }
 
       // Check if token exists and is not revoked
+      const tokenHash = crypto
+        .createHash("sha256")
+        .update(refreshToken)
+        .digest("hex");
+
       const storedToken = await this.prisma.refreshToken.findUnique({
-        where: { token: refreshToken },
+        where: { token: tokenHash },
       });
 
-      if (!storedToken || storedToken.revokedAt) {
+      if (
+        !storedToken ||
+        storedToken.revokedAt ||
+        storedToken.expiresAt < new Date()
+      ) {
         throw new Error("Invalid refresh token");
       }
 
@@ -184,5 +241,17 @@ export class AuthService {
     } catch (error) {
       throw new Error("Invalid refresh token");
     }
+  }
+
+  async revokeRefreshToken(refreshToken: string) {
+    const tokenHash = crypto
+      .createHash("sha256")
+      .update(refreshToken)
+      .digest("hex");
+
+    await this.prisma.refreshToken.updateMany({
+      where: { token: tokenHash },
+      data: { revokedAt: new Date() },
+    });
   }
 }

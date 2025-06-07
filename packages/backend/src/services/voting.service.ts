@@ -22,66 +22,88 @@ export class VotingService {
   }
 
   async castVote(gameId: string, voterId: string, targetId: string | null) {
-    const game = await this.prisma.game.findUnique({
-      where: { id: gameId },
-      include: { players: true },
-    });
+    // Use transaction to prevent race conditions
+    return await this.prisma.$transaction(
+      async (tx) => {
+        // Lock the game row to prevent concurrent modifications
+        const game = await tx.game.update({
+          where: { id: gameId },
+          data: {}, // Touch to lock
+          include: { players: true },
+        });
 
-    if (!game || game.phase !== GamePhase.DAY_VOTING) {
-      throw new Error("Invalid voting phase");
-    }
+        if (!game || game.phase !== GamePhase.DAY_VOTING) {
+          throw new Error("Invalid voting phase");
+        }
 
-    const voter = game.players.find((p) => p.id === voterId);
-    if (!voter || voter.state !== PlayerState.ALIVE) {
-      throw new Error("Invalid voter");
-    }
+        const voter = game.players.find((p) => p.id === voterId);
+        if (!voter || voter.state !== PlayerState.ALIVE) {
+          throw new Error("Invalid voter");
+        }
 
-    // Validate target if not abstaining
-    if (targetId) {
-      const target = game.players.find((p) => p.id === targetId);
-      if (!target || target.state !== PlayerState.ALIVE) {
-        throw new Error("Invalid target");
-      }
-    }
+        // Validate target if not abstaining
+        if (targetId) {
+          const target = game.players.find((p) => p.id === targetId);
+          if (!target || target.state !== PlayerState.ALIVE) {
+            throw new Error("Invalid target");
+          }
+        }
 
-    // Record vote (upsert to allow vote changes)
-    await this.prisma.gameAction.upsert({
-      where: {
-        gameId_performerId_actionType_dayNumber_phase: {
-          gameId,
-          performerId: voterId,
-          actionType: ActionType.DAY_VOTE,
-          dayNumber: game.dayNumber,
-          phase: GamePhase.DAY_VOTING,
-        },
+        // Record vote (upsert to allow vote changes)
+        await tx.gameAction.upsert({
+          where: {
+            gameId_performerId_actionType_dayNumber_phase: {
+              gameId,
+              performerId: voterId,
+              actionType: ActionType.DAY_VOTE,
+              dayNumber: game.dayNumber,
+              phase: GamePhase.DAY_VOTING,
+            },
+          },
+          create: {
+            gameId,
+            performerId: voterId,
+            targetId,
+            actionType: ActionType.DAY_VOTE,
+            dayNumber: game.dayNumber,
+            phase: GamePhase.DAY_VOTING,
+          },
+          update: {
+            targetId,
+            createdAt: new Date(), // Update timestamp
+          },
+        });
+
+        // Check if all living players have voted
+        const livingPlayers = game.players.filter(
+          (p) => p.state === PlayerState.ALIVE,
+        );
+
+        const voteCount = await tx.gameAction.count({
+          where: {
+            gameId,
+            actionType: ActionType.DAY_VOTE,
+            dayNumber: game.dayNumber,
+            phase: GamePhase.DAY_VOTING,
+          },
+        });
+
+        if (voteCount === livingPlayers.length) {
+          // Everyone voted, schedule immediate phase end
+          await this.redis.zadd(
+            "phase_timers",
+            Date.now(),
+            JSON.stringify({ gameId, trigger: "all_voted" }),
+          );
+        }
+
+        // Emit vote update
+        await this.emitVoteUpdate(gameId);
       },
-      create: {
-        gameId,
-        performerId: voterId,
-        targetId,
-        actionType: ActionType.DAY_VOTE,
-        dayNumber: game.dayNumber,
-        phase: GamePhase.DAY_VOTING,
+      {
+        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
       },
-      update: {
-        targetId,
-        createdAt: new Date(), // Update timestamp
-      },
-    });
-
-    // Check if all living players have voted
-    const livingPlayers = game.players.filter(
-      (p) => p.state === PlayerState.ALIVE,
     );
-    const votes = await this.getVotes(gameId, game.dayNumber);
-
-    if (votes.length === livingPlayers.length) {
-      // Everyone voted, end phase early
-      await this.processVoteResults(gameId);
-    }
-
-    // Emit vote update
-    await this.emitVoteUpdate(gameId);
   }
 
   async getVotes(gameId: string, dayNumber: number) {
@@ -112,52 +134,156 @@ export class VotingService {
   }
 
   async processVoteResults(gameId: string) {
-    const game = await this.prisma.game.findUnique({
-      where: { id: gameId },
-      include: { players: true },
-    });
+    // Use transaction for atomic vote processing
+    await this.prisma.$transaction(async (tx) => {
+      const game = await tx.game.findUnique({
+        where: { id: gameId },
+        include: { players: true },
+      });
 
-    if (!game) return;
+      if (!game) return;
 
-    const votes = await this.getVotes(gameId, game.dayNumber);
-    const voteCount = this.countVotes(votes);
+      const votes = await this.getVotes(gameId, game.dayNumber);
+      const voteCount = this.countVotes(votes);
 
-    // Find player(s) with most votes
-    const maxVotes = Math.max(...Object.values(voteCount));
-    const targets = Object.entries(voteCount)
-      .filter(([_, count]) => count === maxVotes)
-      .map(([playerId, _]) => playerId);
+      // Apply Mayor (successful Dictator) double votes
+      const mayorVotes = await this.applyMayorVotes(tx, gameId, voteCount);
 
-    // Handle tie or no elimination
-    let eliminatedPlayerId: string | null = null;
+      // Find player(s) with most votes
+      const maxVotes = Math.max(...Object.values(mayorVotes));
+      const targets = Object.entries(mayorVotes)
+        .filter(([_, count]) => count === maxVotes)
+        .map(([playerId, _]) => playerId);
 
-    if (targets.length === 1 && maxVotes > 0) {
-      eliminatedPlayerId = targets[0];
-    } else if (targets.length > 1) {
-      // Tie-breaking logic
-      eliminatedPlayerId = await this.breakTie(gameId, targets);
-    }
+      // Handle tie or no elimination
+      let eliminatedPlayerId: string | null = null;
 
-    if (eliminatedPlayerId) {
-      await this.eliminatePlayer(gameId, eliminatedPlayerId, "voted_out");
-    }
+      if (targets.length === 1 && maxVotes > 0) {
+        eliminatedPlayerId = targets[0];
+      } else if (targets.length > 1) {
+        // Tie-breaking logic
+        eliminatedPlayerId = await this.breakTie(gameId, targets);
+      }
 
-    // Record vote results
-    await this.prisma.gameEvent.create({
-      data: {
-        gameId,
-        eventType: "vote_results",
-        dayNumber: game.dayNumber,
+      if (eliminatedPlayerId) {
+        // Check for special protections
+        const isProtected = await this.checkVoteProtection(
+          tx,
+          eliminatedPlayerId,
+        );
+
+        if (!isProtected) {
+          await this.eliminatePlayer(gameId, eliminatedPlayerId, "voted_out");
+
+          // Check Mercenary win condition
+          const gameEngineService = new (
+            await import("./game-engine.service.js")
+          ).GameEngineService(this.prisma, this.redis, null as any);
+          await gameEngineService.checkMercenaryWinCondition(
+            gameId,
+            eliminatedPlayerId,
+          );
+        } else {
+          await this.publishGameEvent(gameId, "vote_protection", {
+            message: "The vote target was protected and survives!",
+          });
+        }
+      }
+
+      // Record vote results
+      await tx.gameEvent.create({
         data: {
-          voteCount,
-          eliminated: eliminatedPlayerId,
-          tie: targets.length > 1,
+          gameId,
+          eventType: "vote_results",
+          dayNumber: game.dayNumber,
+          data: {
+            voteCount: mayorVotes,
+            eliminated: eliminatedPlayerId,
+            tie: targets.length > 1,
+          },
         },
-      },
+      });
+
+      // Transition Mercenary if Day 1 ended without their target dying
+      if (game.dayNumber === 1) {
+        const gameEngineService = new (
+          await import("./game-engine.service.js")
+        ).GameEngineService(this.prisma, this.redis, null as any);
+        await gameEngineService.transitionMercenaryToVillager(gameId);
+      }
     });
 
     // Check for game end conditions
     await this.checkGameEndConditions(gameId);
+  }
+
+  private async applyMayorVotes(
+    tx: any,
+    gameId: string,
+    baseVotes: Record<string, number>,
+  ): Promise<Record<string, number>> {
+    const result = { ...baseVotes };
+
+    // Find players with Mayor ability (successful Dictators)
+    const mayorPlayers = await tx.player.findMany({
+      where: {
+        gameId,
+        state: PlayerState.ALIVE,
+        abilities: {
+          some: {
+            abilityType: "mayor_vote",
+            usesLeft: { gt: 0 },
+          },
+        },
+      },
+    });
+
+    for (const mayor of mayorPlayers) {
+      const mayorVote = await tx.gameAction.findFirst({
+        where: {
+          gameId,
+          performerId: mayor.id,
+          actionType: ActionType.DAY_VOTE,
+          targetId: { not: null },
+        },
+      });
+
+      if (mayorVote && mayorVote.targetId) {
+        // Double the mayor's vote
+        result[mayorVote.targetId] = (result[mayorVote.targetId] || 0) + 1;
+      }
+    }
+
+    return result;
+  }
+
+  private async checkVoteProtection(
+    tx: any,
+    playerId: string,
+  ): Promise<boolean> {
+    const player = await tx.player.findUnique({
+      where: { id: playerId },
+      include: {
+        game: {
+          include: {
+            players: true,
+          },
+        },
+      },
+    });
+
+    if (!player) return false;
+
+    // Wolf Riding Hood protection
+    if (player.role === GameRole.WOLF_RIDING_HOOD) {
+      const blackWolfAlive = player.game.players.some(
+        (p: any) =>
+          p.role === GameRole.BLACK_WOLF && p.state === PlayerState.ALIVE,
+      );
+      return blackWolfAlive;
+    }
+
+    return false;
   }
 
   private countVotes(votes: any[]): Record<string, number> {
@@ -192,6 +318,11 @@ export class VotingService {
 
     if (mayorPlayer) {
       // Mayor decides the tie
+      await this.publishGameEvent(gameId, "mayor_tiebreak", {
+        mayorId: mayorPlayer.id,
+        tiedPlayers: tiedPlayerIds,
+      });
+
       // In a real implementation, you'd wait for the Mayor's decision
       // For now, we'll randomly select from tied players
       return tiedPlayerIds[Math.floor(Math.random() * tiedPlayerIds.length)];
@@ -259,8 +390,6 @@ export class VotingService {
 
     // Hunter's revenge shot
     if (player.role === GameRole.HUNTER) {
-      // In a real implementation, you'd prompt the Hunter to choose a target
-      // For now, we'll mark that the Hunter needs to take their shot
       await this.prisma.gameEvent.create({
         data: {
           gameId,
@@ -269,6 +398,12 @@ export class VotingService {
           data: { hunterId: playerId },
         },
       });
+
+      if (this.pubsub) {
+        await this.pubsub.publishGameEvent(gameId, "hunter:triggered", {
+          hunterId: playerId,
+        });
+      }
     }
 
     // Cupid's lover link
@@ -282,166 +417,40 @@ export class VotingService {
       }
     }
 
-    // Heir inheritance
-    const heirAbility = await this.prisma.ability.findFirst({
-      where: {
-        abilityType: "heir_target",
-        metadata: {
-          path: ["targetId"],
-          equals: playerId,
-        },
-      },
-      include: { player: true },
-    });
-
-    if (heirAbility && heirAbility.player.state === PlayerState.ALIVE) {
-      // Heir inherits the role
-      await this.prisma.player.update({
-        where: { id: heirAbility.playerId },
-        data: { role: player.role },
-      });
-
-      // Transfer abilities
-      const targetAbilities = await this.prisma.ability.findMany({
-        where: { playerId },
-      });
-
-      for (const ability of targetAbilities) {
-        await this.prisma.ability.create({
-          data: {
-            playerId: heirAbility.playerId,
-            abilityType: ability.abilityType,
-            usesLeft: ability.usesLeft,
-            maxUses: ability.maxUses,
-            cooldownDays: ability.cooldownDays,
-            lastUsedDay: ability.lastUsedDay,
-          },
-        });
-      }
-    }
-
-    // Wolf Riding Hood protection check
-    if (player.role === GameRole.BLACK_WOLF) {
-      const wolfRidingHood = await this.prisma.player.findFirst({
-        where: {
-          gameId,
-          role: GameRole.WOLF_RIDING_HOOD,
-          state: PlayerState.ALIVE,
-        },
-      });
-
-      if (wolfRidingHood) {
-        // Wolf Riding Hood loses protection
-        await this.prisma.gameEvent.create({
-          data: {
-            gameId,
-            eventType: "protection_lost",
-            dayNumber: player.game.dayNumber,
-            data: {
-              playerId: wolfRidingHood.id,
-              protectionType: "black_wolf",
-            },
-          },
-        });
-      }
-    }
-
-    // Similar check for Hunter/Red Riding Hood relationship
-    if (player.role === GameRole.HUNTER) {
-      const redRidingHood = await this.prisma.player.findFirst({
-        where: {
-          gameId,
-          role: GameRole.RED_RIDING_HOOD,
-          state: PlayerState.ALIVE,
-        },
-      });
-
-      if (redRidingHood) {
-        await this.prisma.gameEvent.create({
-          data: {
-            gameId,
-            eventType: "protection_lost",
-            dayNumber: player.game.dayNumber,
-            data: {
-              playerId: redRidingHood.id,
-              protectionType: "hunter",
-            },
-          },
-        });
-      }
-    }
-  }
-
-  private async checkGameEndConditions(gameId: string) {
-    const alivePlayers = await this.prisma.player.findMany({
+    // Check if someone was linked to this player
+    const linkedLover = await this.prisma.player.findFirst({
       where: {
         gameId,
+        linkedTo: playerId,
         state: PlayerState.ALIVE,
       },
     });
 
-    if (alivePlayers.length === 0) {
-      await this.endGame(gameId, null, "all_players_dead");
-      return;
+    if (linkedLover) {
+      await this.eliminatePlayer(gameId, linkedLover.id, "died_of_grief");
     }
 
-    // Count teams
-    const teamCounts = {
-      WEREWOLVES: 0,
-      VILLAGERS: 0,
-      SOLO: 0,
-    };
+    // Call shared death trigger handler
+    const gameEngineService = new (
+      await import("./game-engine.service.js")
+    ).GameEngineService(this.prisma, this.redis, null as any);
+    await gameEngineService["handleDeathTriggers"](gameId, player);
+  }
 
-    const roleService = new (await import("./role.service.js")).RoleService(
-      this.prisma,
-    );
+  private async checkGameEndConditions(gameId: string) {
+    const gameEngineService = new (
+      await import("./game-engine.service.js")
+    ).GameEngineService(this.prisma, this.redis, null as any);
 
-    alivePlayers.forEach((player) => {
-      const team = roleService.getTeamForRole(player.role);
-      teamCounts[team]++;
-    });
-
-    // Check White Wolf win condition (sole survivor)
-    const whiteWolf = alivePlayers.find((p) => p.role === GameRole.WHITE_WOLF);
-    if (whiteWolf && alivePlayers.length === 1) {
-      await this.endGame(gameId, "SOLO", "white_wolf_victory");
-      return;
-    }
-
-    // Check Werewolves win condition (equal or greater than villagers)
-    if (teamCounts.WEREWOLVES >= teamCounts.VILLAGERS + teamCounts.SOLO) {
-      await this.endGame(gameId, "WEREWOLVES", "werewolves_majority");
-      return;
-    }
-
-    // Check Villagers win condition (no werewolves)
-    if (teamCounts.WEREWOLVES === 0) {
-      await this.endGame(gameId, "VILLAGERS", "werewolves_eliminated");
-      return;
+    const winner = await gameEngineService["checkWinConditions"](gameId);
+    if (winner !== null) {
+      await gameEngineService["endGame"](gameId, winner);
     }
   }
 
-  private async endGame(
-    gameId: string,
-    winningTeam: string | null,
-    reason: string,
-  ) {
-    await this.prisma.game.update({
-      where: { id: gameId },
-      data: {
-        state: "ENDED",
-        phase: "GAME_END",
-        winningTeam: winningTeam as any,
-        endReason: reason,
-        endedAt: new Date(),
-      },
-    });
-
+  private async publishGameEvent(gameId: string, event: string, data: any) {
     if (this.pubsub) {
-      await this.pubsub.publishGameEvent(gameId, "game:ended", {
-        winningTeam,
-        reason,
-      });
+      await this.pubsub.publishGameEvent(gameId, event, data);
     }
   }
 

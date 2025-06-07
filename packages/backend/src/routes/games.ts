@@ -1,6 +1,11 @@
 import { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { GameService } from "../services/game.service.js";
+import {
+  validateParams,
+  uuidSchema,
+  gameCodeSchema,
+} from "../middleware/validation.js";
 
 const createGameSchema = z.object({
   name: z.string().min(1).max(50),
@@ -90,7 +95,10 @@ export const registerGameRoutes: FastifyPluginAsyncZod = async (app) => {
   app.get(
     "/:gameId",
     {
-      preHandler: app.authenticate,
+      preHandler: [
+        app.authenticate,
+        validateParams(z.object({ gameId: uuidSchema })),
+      ],
     },
     async (request, reply) => {
       const { gameId } = request.params as { gameId: string };
@@ -113,7 +121,10 @@ export const registerGameRoutes: FastifyPluginAsyncZod = async (app) => {
   app.get(
     "/code/:code",
     {
-      preHandler: app.authenticate,
+      preHandler: [
+        app.authenticate,
+        validateParams(z.object({ code: gameCodeSchema })),
+      ],
     },
     async (request, reply) => {
       const { code } = request.params as { code: string };

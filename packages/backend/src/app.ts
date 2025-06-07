@@ -2,6 +2,7 @@ import Fastify, { FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
 import jwt from "@fastify/jwt";
+import rateLimit from "@fastify/rate-limit";
 import { Server as SocketIOServer } from "socket.io";
 import { createServer } from "http";
 import { env } from "./config/env.js";
@@ -38,6 +39,7 @@ export async function createApp(): Promise<{
       transport:
         env.NODE_ENV === "development" ? { target: "pino-pretty" } : undefined,
     },
+    trustProxy: true, // Important for rate limiting with reverse proxy
   });
 
   // Database clients
@@ -75,6 +77,27 @@ export async function createApp(): Promise<{
     },
   });
 
+  // Rate limiting with Redis
+  await app.register(rateLimit, {
+    global: false, // We'll apply per-route
+    redis: redis,
+    nameSpace: "rate-limit:",
+    keyGenerator: (request) => {
+      // Use authenticated user ID if available, otherwise IP
+      return request.user?.userId || request.ip;
+    },
+    errorResponseBuilder: (request, context) => {
+      return {
+        statusCode: 429,
+        error: "Too Many Requests",
+        message: `Rate limit exceeded, retry in ${Math.round(
+          context.ttl / 1000,
+        )} seconds`,
+        retry_after: context.ttl,
+      };
+    },
+  });
+
   await app.register(authPlugin);
 
   // Routes
@@ -87,6 +110,20 @@ export async function createApp(): Promise<{
   // Health check
   app.get("/health", async () => ({ status: "ok" }));
 
+  // Global error handler with sanitized messages
+  app.setErrorHandler((error, request, reply) => {
+    app.log.error(error);
+
+    // Don't expose internal errors to users
+    const statusCode = error.statusCode || 500;
+    const message = statusCode < 500 ? error.message : "Internal server error";
+
+    reply.status(statusCode).send({
+      error: message,
+      statusCode,
+    });
+  });
+
   // Create HTTP server and Socket.IO
   const httpServer = createServer(app.server);
   const io = new SocketIOServer(httpServer, {
@@ -94,14 +131,19 @@ export async function createApp(): Promise<{
       origin: env.FRONTEND_URL,
       credentials: true,
     },
+    pingTimeout: 60000,
+    pingInterval: 25000,
   });
 
   const pubsub = new GamePubSub(env.REDIS_URL, io);
-  
+
   // Connect PubSub to services
   votingService.setPubSub(pubsub);
   chatService.setPubSub(pubsub);
   gameEngineService.setPubSub(pubsub);
+
+  // Initialize timer processor
+  await gameEngineService.initializeTimerProcessor();
 
   io.use(authenticateSocket);
 

@@ -6,6 +6,7 @@ import {
   ActionType,
   Team,
   ActionResult as GameActionResult,
+  Prisma,
 } from "@werewolf/database";
 import { PrismaClientType } from "../lib/prisma.js";
 import { RedisClientType } from "../lib/redis.js";
@@ -16,6 +17,7 @@ import { GamePubSub } from "../lib/pubsub.js";
 export class GameEngineService {
   private phaseTimers: Map<string, NodeJS.Timeout> = new Map();
   private pubsub?: GamePubSub;
+  private timerCheckInterval?: NodeJS.Timer;
 
   constructor(
     private prisma: PrismaClientType,
@@ -25,6 +27,44 @@ export class GameEngineService {
 
   setPubSub(pubsub: GamePubSub) {
     this.pubsub = pubsub;
+  }
+
+  async initializeTimerProcessor() {
+    // Process any timers that expired while server was down
+    await this.processExpiredTimers();
+
+    // Check for expired timers every second
+    this.timerCheckInterval = setInterval(async () => {
+      await this.processExpiredTimers();
+    }, 1000);
+  }
+
+  private async processExpiredTimers() {
+    const now = Date.now();
+    const expiredTimers = await this.redis.zrangebyscore(
+      "phase_timers",
+      "-inf",
+      now,
+    );
+
+    for (const timerData of expiredTimers) {
+      try {
+        const { gameId, phase } = JSON.parse(timerData);
+        const game = await this.prisma.game.findUnique({
+          where: { id: gameId },
+        });
+
+        if (game && game.phase === phase) {
+          const nextPhase = this.getNextPhase(phase);
+          await this.transitionToPhase(gameId, nextPhase);
+        }
+
+        await this.redis.zrem("phase_timers", timerData);
+      } catch (error) {
+        console.error("Error processing timer:", error);
+        await this.redis.zrem("phase_timers", timerData);
+      }
+    }
   }
 
   async scheduleGameStart(gameId: string) {
@@ -49,64 +89,67 @@ export class GameEngineService {
   }
 
   async transitionToPhase(gameId: string, nextPhase: GamePhase) {
-    // Clear existing timer
-    this.clearPhaseTimer(gameId);
+    // Use transaction to prevent race conditions
+    await this.prisma.$transaction(async (tx) => {
+      // Clear existing timer
+      await this.clearPhaseTimer(gameId);
 
-    const game = await this.prisma.game.findUnique({
-      where: { id: gameId },
-      include: { players: true },
-    });
+      const game = await tx.game.findUnique({
+        where: { id: gameId },
+        include: { players: true },
+      });
 
-    if (!game) throw new Error("Game not found");
+      if (!game) throw new Error("Game not found");
 
-    // Process end of current phase
-    await this.processPhaseEnd(gameId, game.phase);
+      // Process end of current phase
+      await this.processPhaseEnd(gameId, game.phase);
 
-    // Check win conditions before transitioning
-    const winner = await this.checkWinConditions(gameId);
-    if (winner) {
-      await this.endGame(gameId, winner);
-      return;
-    }
+      // Check win conditions before transitioning
+      const winner = await this.checkWinConditions(gameId);
+      if (winner) {
+        await this.endGame(gameId, winner);
+        return;
+      }
 
-    // Determine phase duration
-    const duration = this.getPhaseDuration(game, nextPhase);
-    const phaseEndsAt = duration
-      ? new Date(Date.now() + duration * 1000)
-      : null;
+      // Determine phase duration
+      const duration = this.getPhaseDuration(game, nextPhase);
+      const phaseEndsAt = duration
+        ? new Date(Date.now() + duration * 1000)
+        : null;
 
-    // Update game state
-    await this.prisma.game.update({
-      where: { id: gameId },
-      data: {
+      // Update game state
+      await tx.game.update({
+        where: { id: gameId },
+        data: {
+          phase: nextPhase,
+          state: this.getStateForPhase(nextPhase),
+          phaseStartedAt: new Date(),
+          phaseEndsAt,
+          dayNumber:
+            nextPhase === GamePhase.NIGHT_PHASE
+              ? game.dayNumber + 1
+              : game.dayNumber,
+        },
+      });
+
+      // Execute phase-specific logic
+      await this.executePhaseTransition(gameId, nextPhase);
+
+      // Schedule next phase if applicable
+      if (duration && nextPhase !== GamePhase.GAME_END) {
+        await this.schedulePhaseEnd(gameId, nextPhase, duration);
+      }
+
+      // Emit phase change event
+      await this.publishGameEvent(gameId, "phase_change", {
         phase: nextPhase,
-        state: this.getStateForPhase(nextPhase),
-        phaseStartedAt: new Date(),
-        phaseEndsAt,
+        duration,
+        endsAt: phaseEndsAt,
         dayNumber:
           nextPhase === GamePhase.NIGHT_PHASE
             ? game.dayNumber + 1
             : game.dayNumber,
-      },
-    });
-
-    // Execute phase-specific logic
-    await this.executePhaseTransition(gameId, nextPhase);
-
-    // Schedule next phase if applicable
-    if (duration && nextPhase !== GamePhase.GAME_END) {
-      this.schedulePhaseEnd(gameId, nextPhase, duration);
-    }
-
-    // Emit phase change event
-    await this.publishGameEvent(gameId, "phase_change", {
-      phase: nextPhase,
-      duration,
-      endsAt: phaseEndsAt,
-      dayNumber:
-        nextPhase === GamePhase.NIGHT_PHASE
-          ? game.dayNumber + 1
-          : game.dayNumber,
+      });
     });
   }
 
@@ -165,6 +208,9 @@ export class GameEngineService {
       },
     });
 
+    // Handle special night mechanics
+    await this.handleNightPhaseMechanics(gameId);
+
     // Enable night abilities for special roles
     const players = await this.prisma.player.findMany({
       where: { gameId, state: PlayerState.ALIVE },
@@ -199,6 +245,45 @@ export class GameEngineService {
         await this.publishPlayerEvent(gameId, player.id, "first_night_action", {
           role: player.role,
         });
+      }
+    }
+  }
+
+  private async handleNightPhaseMechanics(gameId: string) {
+    const game = await this.prisma.game.findUnique({
+      where: { id: gameId },
+    });
+
+    if (!game) return;
+
+    // Little Girl passive ability
+    const littleGirl = await this.prisma.player.findFirst({
+      where: {
+        gameId,
+        role: GameRole.LITTLE_GIRL,
+        state: PlayerState.ALIVE,
+      },
+      include: { user: true },
+    });
+
+    if (littleGirl) {
+      // 10% chance of being caught each night
+      if (Math.random() < 0.1) {
+        await this.killPlayer(gameId, littleGirl.id, "caught_spying");
+        await this.publishGameEvent(gameId, "little_girl_caught", {
+          playerName: littleGirl.user.displayName,
+        });
+      } else {
+        // Grant access to werewolf chat
+        await this.publishPlayerEvent(
+          gameId,
+          littleGirl.id,
+          "channel_access_granted",
+          {
+            channel: "werewolves",
+            duration: game.nightDuration,
+          },
+        );
       }
     }
   }
@@ -262,13 +347,13 @@ export class GameEngineService {
   }
 
   private async startVotingPhase(gameId: string) {
-    // Clear any existing votes
     const game = await this.prisma.game.findUnique({
       where: { id: gameId },
     });
 
     if (!game) return;
 
+    // Clear any existing votes
     await this.prisma.gameAction.deleteMany({
       where: {
         gameId,
@@ -277,10 +362,56 @@ export class GameEngineService {
       },
     });
 
+    // Check for Mercenary on Day 1
+    if (game.dayNumber === 1) {
+      await this.handleMercenaryCheck(gameId);
+    }
+
     // Notify players voting has started
     await this.publishGameEvent(gameId, "voting_started", {
       timeLimit: game.voteDuration,
     });
+  }
+
+  private async handleMercenaryCheck(gameId: string) {
+    const mercenary = await this.prisma.player.findFirst({
+      where: {
+        gameId,
+        role: GameRole.MERCENARY,
+        state: PlayerState.ALIVE,
+      },
+      include: { user: true },
+    });
+
+    if (!mercenary) return;
+
+    const targetAbility = await this.prisma.ability.findFirst({
+      where: {
+        playerId: mercenary.id,
+        abilityType: "mercenary_target",
+      },
+    });
+
+    if (targetAbility?.metadata) {
+      const targetId = (targetAbility.metadata as any).targetId;
+      const target = await this.prisma.player.findUnique({
+        where: { id: targetId },
+        include: { user: true },
+      });
+
+      if (target) {
+        await this.publishPlayerEvent(
+          gameId,
+          mercenary.id,
+          "mercenary_reminder",
+          {
+            targetName: target.user.displayName,
+            targetId: target.id,
+            dayNumber: 1,
+          },
+        );
+      }
+    }
   }
 
   private async processNightActions(gameId: string) {
@@ -323,7 +454,10 @@ export class GameEngineService {
 
     // Apply deaths
     for (const [playerId, cause] of deaths) {
-      if (!protectedPlayers.has(playerId)) {
+      // Check special protections
+      const isProtected = await this.isPlayerProtected(playerId, cause);
+
+      if (!protectedPlayers.has(playerId) && !isProtected) {
         await this.killPlayer(gameId, playerId, cause);
       } else {
         // Player was saved
@@ -492,9 +626,124 @@ export class GameEngineService {
         }
         break;
       }
+
+      case ActionType.CUPID_LINK: {
+        if (action.metadata) {
+          const { player1Id, player2Id } = action.metadata as any;
+
+          // Link the players
+          await this.prisma.player.update({
+            where: { id: player1Id },
+            data: { linkedTo: player2Id },
+          });
+
+          await this.prisma.player.update({
+            where: { id: player2Id },
+            data: { linkedTo: player1Id },
+          });
+
+          // Notify the lovers
+          await this.publishPlayerEvent(
+            action.gameId,
+            player1Id,
+            "became_lover",
+            { partnerId: player2Id },
+          );
+
+          await this.publishPlayerEvent(
+            action.gameId,
+            player2Id,
+            "became_lover",
+            { partnerId: player1Id },
+          );
+
+          result.success = true;
+        }
+        break;
+      }
+
+      case ActionType.HEIR_CHOOSE: {
+        if (action.targetId) {
+          // Store the heir relationship
+          await this.prisma.ability.upsert({
+            where: {
+              playerId_abilityType: {
+                playerId: action.performerId,
+                abilityType: "heir_target",
+              },
+            },
+            create: {
+              playerId: action.performerId,
+              abilityType: "heir_target",
+              usesLeft: 1,
+              maxUses: 1,
+              metadata: { targetId: action.targetId },
+            },
+            update: {
+              metadata: { targetId: action.targetId },
+            },
+          });
+
+          result.success = true;
+        }
+        break;
+      }
     }
 
     return result;
+  }
+
+  private async isPlayerProtected(
+    playerId: string,
+    deathCause: string,
+  ): Promise<boolean> {
+    const player = await this.prisma.player.findUnique({
+      where: { id: playerId },
+      include: {
+        game: {
+          include: {
+            players: true,
+          },
+        },
+      },
+    });
+
+    if (!player) return false;
+
+    // Red Riding Hood protection
+    if (
+      player.role === GameRole.RED_RIDING_HOOD &&
+      deathCause === "werewolf_attack"
+    ) {
+      const hunterAlive = player.game.players.some(
+        (p) => p.role === GameRole.HUNTER && p.state === PlayerState.ALIVE,
+      );
+      return hunterAlive;
+    }
+
+    // Blue Riding Hood protection
+    if (
+      player.role === GameRole.BLUE_RIDING_HOOD &&
+      deathCause === "werewolf_attack"
+    ) {
+      const villagersAlive = player.game.players.some(
+        (p) => p.role === GameRole.VILLAGER && p.state === PlayerState.ALIVE,
+      );
+      return villagersAlive;
+    }
+
+    // Wolf Riding Hood protection
+    if (
+      player.role === GameRole.WOLF_RIDING_HOOD &&
+      deathCause === "voted_out"
+    ) {
+      const blackWolfAlive = player.game.players.some(
+        (p) => p.role === GameRole.BLACK_WOLF && p.state === PlayerState.ALIVE,
+      );
+      return blackWolfAlive;
+    }
+
+    return false;
   }
 
   private async killPlayer(gameId: string, playerId: string, cause: string) {
@@ -569,6 +818,197 @@ export class GameEngineService {
     if (linkedLover) {
       await this.killPlayer(gameId, linkedLover.id, "grief");
     }
+
+    // Handle Heir inheritance
+    const heirAbility = await this.prisma.ability.findFirst({
+      where: {
+        abilityType: "heir_target",
+        metadata: {
+          path: ["targetId"],
+          equals: deadPlayer.id,
+        },
+      },
+      include: { player: true },
+    });
+
+    if (heirAbility && heirAbility.player.state === PlayerState.ALIVE) {
+      // Heir inherits the role
+      await this.prisma.player.update({
+        where: { id: heirAbility.playerId },
+        data: { role: deadPlayer.role },
+      });
+
+      // Initialize fresh abilities for the new role
+      await this.roleService.initializeAbilities(
+        heirAbility.playerId,
+        deadPlayer.role,
+      );
+
+      await this.publishPlayerEvent(
+        gameId,
+        heirAbility.playerId,
+        "role_inherited",
+        {
+          newRole: deadPlayer.role,
+          fromPlayer: deadPlayer.user.displayName,
+        },
+      );
+    }
+
+    // Handle Plunderer (first death)
+    const deathCount = await this.prisma.player.count({
+      where: {
+        gameId,
+        state: PlayerState.DEAD,
+      },
+    });
+
+    if (deathCount === 1) {
+      const plunderer = await this.prisma.player.findFirst({
+        where: {
+          gameId,
+          role: GameRole.PLUNDERER,
+          state: PlayerState.ALIVE,
+        },
+      });
+
+      if (plunderer) {
+        // Plunderer inherits the role
+        await this.prisma.player.update({
+          where: { id: plunderer.id },
+          data: { role: deadPlayer.role },
+        });
+
+        // Initialize fresh abilities for the new role
+        await this.roleService.initializeAbilities(
+          plunderer.id,
+          deadPlayer.role,
+        );
+
+        await this.publishPlayerEvent(gameId, plunderer.id, "role_stolen", {
+          newRole: deadPlayer.role,
+          fromPlayer: deadPlayer.user.displayName,
+        });
+      }
+    }
+
+    // Check protection losses
+    await this.checkProtectionLosses(gameId, deadPlayer);
+  }
+
+  private async checkProtectionLosses(gameId: string, deadPlayer: any) {
+    // Wolf Riding Hood loses protection if Black Wolf dies
+    if (deadPlayer.role === GameRole.BLACK_WOLF) {
+      const wolfRidingHood = await this.prisma.player.findFirst({
+        where: {
+          gameId,
+          role: GameRole.WOLF_RIDING_HOOD,
+          state: PlayerState.ALIVE,
+        },
+      });
+
+      if (wolfRidingHood) {
+        await this.publishPlayerEvent(
+          gameId,
+          wolfRidingHood.id,
+          "protection_lost",
+          {
+            protectionType: "vote_immunity",
+          },
+        );
+      }
+    }
+
+    // Red Riding Hood loses protection if Hunter dies
+    if (deadPlayer.role === GameRole.HUNTER) {
+      const redRidingHood = await this.prisma.player.findFirst({
+        where: {
+          gameId,
+          role: GameRole.RED_RIDING_HOOD,
+          state: PlayerState.ALIVE,
+        },
+      });
+
+      if (redRidingHood) {
+        await this.publishPlayerEvent(
+          gameId,
+          redRidingHood.id,
+          "protection_lost",
+          {
+            protectionType: "werewolf_immunity",
+          },
+        );
+      }
+    }
+  }
+
+  async checkMercenaryWinCondition(gameId: string, votedOutPlayerId: string) {
+    const game = await this.prisma.game.findUnique({
+      where: { id: gameId },
+    });
+
+    if (!game || game.dayNumber !== 1) return;
+
+    const mercenary = await this.prisma.player.findFirst({
+      where: {
+        gameId,
+        role: GameRole.MERCENARY,
+        state: PlayerState.ALIVE,
+      },
+      include: { user: true },
+    });
+
+    if (!mercenary) return;
+
+    const targetAbility = await this.prisma.ability.findFirst({
+      where: {
+        playerId: mercenary.id,
+        abilityType: "mercenary_target",
+      },
+    });
+
+    if (!targetAbility || !targetAbility.metadata) return;
+
+    const targetId = (targetAbility.metadata as any).targetId;
+
+    if (targetId === votedOutPlayerId) {
+      // Mercenary wins!
+      await this.endGame(gameId, Team.SOLO);
+
+      await this.publishGameEvent(gameId, "mercenary_victory", {
+        mercenaryName: mercenary.user.displayName,
+        message: "The Mercenary successfully eliminated their target!",
+      });
+    }
+  }
+
+  async transitionMercenaryToVillager(gameId: string) {
+    const game = await this.prisma.game.findUnique({
+      where: { id: gameId },
+    });
+
+    if (!game || game.dayNumber !== 1) return;
+
+    const mercenary = await this.prisma.player.findFirst({
+      where: {
+        gameId,
+        role: GameRole.MERCENARY,
+        state: PlayerState.ALIVE,
+      },
+    });
+
+    if (!mercenary) return;
+
+    // Convert to villager
+    await this.prisma.player.update({
+      where: { id: mercenary.id },
+      data: { role: GameRole.VILLAGER },
+    });
+
+    await this.publishPlayerEvent(gameId, mercenary.id, "mercenary_failed", {
+      newRole: GameRole.VILLAGER,
+      message: "You failed to eliminate your target. You are now a Villager.",
+    });
   }
 
   private async checkWinConditions(gameId: string): Promise<Team | null> {
@@ -581,6 +1021,13 @@ export class GameEngineService {
 
     if (alivePlayers.length === 0) {
       return null; // Draw
+    }
+
+    // Check Cupid lovers win condition
+    const lovers = alivePlayers.filter((p) => p.linkedTo !== null);
+    if (lovers.length === 2 && alivePlayers.length === 2) {
+      // Only the two lovers remain - they win
+      return Team.VILLAGERS; // Lovers win counts as villager victory
     }
 
     const werewolves = alivePlayers.filter((p) =>
@@ -635,7 +1082,7 @@ export class GameEngineService {
     });
 
     // Clear phase timer
-    this.clearPhaseTimer(gameId);
+    await this.clearPhaseTimer(gameId);
 
     // Update player statistics
     const players = await this.prisma.player.findMany({
@@ -697,7 +1144,21 @@ export class GameEngineService {
     });
   }
 
-  private schedulePhaseEnd(gameId: string, phase: GamePhase, duration: number) {
+  private async schedulePhaseEnd(
+    gameId: string,
+    phase: GamePhase,
+    duration: number,
+  ) {
+    const endTime = Date.now() + duration * 1000;
+
+    // Store in Redis
+    await this.redis.zadd(
+      "phase_timers",
+      endTime,
+      JSON.stringify({ gameId, phase, endTime }),
+    );
+
+    // Set local timer as backup
     const timer = setTimeout(async () => {
       try {
         const nextPhase = this.getNextPhase(phase);
@@ -710,12 +1171,34 @@ export class GameEngineService {
     this.phaseTimers.set(gameId, timer);
   }
 
-  private clearPhaseTimer(gameId: string) {
+  private async clearPhaseTimer(gameId: string) {
+    // Clear local timer
     const timer = this.phaseTimers.get(gameId);
     if (timer) {
       clearTimeout(timer);
       this.phaseTimers.delete(gameId);
     }
+
+    // Clear from Redis
+    const timers = await this.redis.zrange("phase_timers", 0, -1);
+    for (const timerData of timers) {
+      const data = JSON.parse(timerData);
+      if (data.gameId === gameId) {
+        await this.redis.zrem("phase_timers", timerData);
+      }
+    }
+  }
+
+  cleanup() {
+    // Clear all timers on shutdown
+    if (this.timerCheckInterval) {
+      clearInterval(this.timerCheckInterval);
+    }
+
+    for (const timer of this.phaseTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.phaseTimers.clear();
   }
 
   private getPhaseDuration(game: any, phase: GamePhase): number {
@@ -815,7 +1298,9 @@ export class GameEngineService {
   }
 
   private async publishGameEvent(gameId: string, event: string, data: any) {
-    await this.redis.publish(`game:${gameId}:${event}`, JSON.stringify(data));
+    if (this.pubsub) {
+      await this.pubsub.publishGameEvent(gameId, event, data);
+    }
   }
 
   private async publishPlayerEvent(
@@ -828,200 +1313,6 @@ export class GameEngineService {
       `game:${gameId}:player:${playerId}:${event}`,
       JSON.stringify(data),
     );
-  }
-
-  // Add these methods to the existing GameEngineService class
-
-  // Add after the existing processAction method
-  private async processSpecialFirstNightActions(gameId: string) {
-    const game = await this.prisma.game.findUnique({
-      where: { id: gameId },
-    });
-
-    if (!game || game.dayNumber !== 1) return;
-
-    // Process Cupid links
-    const cupidAction = await this.prisma.gameAction.findFirst({
-      where: {
-        gameId,
-        actionType: ActionType.CUPID_LINK,
-        dayNumber: 1,
-        phase: GamePhase.NIGHT_PHASE,
-      },
-    });
-
-    if (cupidAction && cupidAction.metadata) {
-      const { player1Id, player2Id } = cupidAction.metadata as any;
-
-      // Link the players
-      await this.prisma.player.update({
-        where: { id: player1Id },
-        data: { linkedTo: player2Id },
-      });
-
-      await this.prisma.player.update({
-        where: { id: player2Id },
-        data: { linkedTo: player1Id },
-      });
-
-      // Notify the lovers
-      await this.publishPlayerEvent(gameId, player1Id, "became_lover", {
-        partnerId: player2Id,
-      });
-
-      await this.publishPlayerEvent(gameId, player2Id, "became_lover", {
-        partnerId: player1Id,
-      });
-    }
-
-    // Process Heir choices
-    const heirAction = await this.prisma.gameAction.findFirst({
-      where: {
-        gameId,
-        actionType: ActionType.HEIR_CHOOSE,
-        dayNumber: 1,
-        phase: GamePhase.NIGHT_PHASE,
-      },
-    });
-
-    if (heirAction && heirAction.targetId) {
-      // Store the heir relationship
-      await this.prisma.ability.update({
-        where: {
-          playerId_abilityType: {
-            playerId: heirAction.performerId,
-            abilityType: "heir_target",
-          },
-        },
-        data: {
-          metadata: { targetId: heirAction.targetId },
-        },
-      });
-    }
-  }
-
-  // Add Little Girl passive ability
-  private async handleLittleGirl(gameId: string) {
-    const littleGirl = await this.prisma.player.findFirst({
-      where: {
-        gameId,
-        role: GameRole.LITTLE_GIRL,
-        state: PlayerState.ALIVE,
-      },
-      include: { user: true },
-    });
-
-    if (!littleGirl) return;
-
-    // 10% chance of being caught each night
-    const caught = Math.random() < 0.1;
-
-    if (caught) {
-      await this.killPlayer(gameId, littleGirl.id, "caught_spying");
-
-      await this.publishGameEvent(gameId, "little_girl_caught", {
-        playerName: littleGirl.user.displayName,
-      });
-    } else {
-      // Little Girl sees werewolf chat
-      await this.publishPlayerEvent(
-        gameId,
-        littleGirl.id,
-        "werewolf_chat_access",
-        { channel: "werewolves" },
-      );
-    }
-  }
-
-  // Handle special protections
-  private async checkSpecialProtections(
-    playerId: string,
-    cause: string,
-  ): Promise<boolean> {
-    const player = await this.prisma.player.findUnique({
-      where: { id: playerId },
-      include: { game: { include: { players: true } } },
-    });
-
-    if (!player) return false;
-
-    // Check Wolf Riding Hood protection
-    if (player.role === GameRole.WOLF_RIDING_HOOD && cause === "voted_out") {
-      const blackWolfAlive = player.game.players.some(
-        (p) => p.role === GameRole.BLACK_WOLF && p.state === PlayerState.ALIVE,
-      );
-      return blackWolfAlive;
-    }
-
-    // Check Red Riding Hood protection
-    if (
-      player.role === GameRole.RED_RIDING_HOOD &&
-      cause === "werewolf_attack"
-    ) {
-      const hunterAlive = player.game.players.some(
-        (p) => p.role === GameRole.HUNTER && p.state === PlayerState.ALIVE,
-      );
-      return hunterAlive;
-    }
-
-    // Check Blue Riding Hood protection
-    if (
-      player.role === GameRole.BLUE_RIDING_HOOD &&
-      cause === "werewolf_attack"
-    ) {
-      const villagersAlive = player.game.players.some(
-        (p) => p.role === GameRole.VILLAGER && p.state === PlayerState.ALIVE,
-      );
-      return villagersAlive;
-    }
-
-    return false;
-  }
-
-  // Handle Plunderer role inheritance
-  private async handlePlunderer(gameId: string, deadPlayerId: string) {
-    const plunderer = await this.prisma.player.findFirst({
-      where: {
-        gameId,
-        role: GameRole.PLUNDERER,
-        state: PlayerState.ALIVE,
-      },
-    });
-
-    if (!plunderer) return;
-
-    // Check if this is the first death
-    const previousDeaths = await this.prisma.player.count({
-      where: {
-        gameId,
-        state: PlayerState.DEAD,
-        id: { not: deadPlayerId },
-      },
-    });
-
-    if (previousDeaths === 0) {
-      const deadPlayer = await this.prisma.player.findUnique({
-        where: { id: deadPlayerId },
-      });
-
-      if (deadPlayer) {
-        // Plunderer inherits the role
-        await this.prisma.player.update({
-          where: { id: plunderer.id },
-          data: { role: deadPlayer.role },
-        });
-
-        // Initialize fresh abilities for the new role
-        await this.roleService.initializeAbilities(
-          plunderer.id,
-          deadPlayer.role,
-        );
-
-        await this.publishPlayerEvent(gameId, plunderer.id, "role_changed", {
-          newRole: deadPlayer.role,
-        });
-      }
-    }
   }
 
   // Hunter revenge mechanic
@@ -1149,61 +1440,6 @@ export class GameEngineService {
       await this.publishGameEvent(gameId, "dictator_failed", {
         dictatorName: dictator.user.displayName,
         targetName: target.user.displayName,
-      });
-    }
-  }
-
-  // Mercenary win condition check
-  private async checkMercenaryWin(gameId: string) {
-    const game = await this.prisma.game.findUnique({
-      where: { id: gameId },
-    });
-
-    if (!game || game.dayNumber !== 1) return;
-
-    const mercenary = await this.prisma.player.findFirst({
-      where: {
-        gameId,
-        role: GameRole.MERCENARY,
-        state: PlayerState.ALIVE,
-      },
-      include: { user: true },
-    });
-
-    if (!mercenary) return;
-
-    const targetAbility = await this.prisma.ability.findFirst({
-      where: {
-        playerId: mercenary.id,
-        abilityType: "mercenary_target",
-      },
-    });
-
-    if (!targetAbility || !targetAbility.metadata) return;
-
-    const targetId = (targetAbility.metadata as any).targetId;
-    const target = await this.prisma.player.findUnique({
-      where: { id: targetId },
-      include: { user: true },
-    });
-
-    if (target && target.state === PlayerState.DEAD) {
-      // Mercenary wins!
-      await this.endGame(gameId, Team.SOLO);
-
-      await this.publishGameEvent(gameId, "mercenary_victory", {
-        mercenaryName: mercenary.user.displayName,
-        targetName: target.user.displayName,
-      });
-    } else {
-      // Mercenary becomes a villager
-      await this.prisma.player.update({
-        where: { id: mercenary.id },
-        data: { role: GameRole.VILLAGER },
-      });
-
-      await this.publishPlayerEvent(gameId, mercenary.id, "mercenary_failed", {
-        newRole: GameRole.VILLAGER,
       });
     }
   }
